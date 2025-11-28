@@ -7,11 +7,11 @@ Current status is work in progress. Don't use it without testing and fixing.
 
 ## Features
 
-- **Multiple Broker Support**: Connects Kafka, NATS, and AMQP (e.g., RabbitMQ) in any direction.
+- **Multiple Broker Support**: Connects Kafka, NATS, AMQP (e.g., RabbitMQ), and MQTT in any direction.
 - **Resilient**: Includes retry logic with exponential backoff and a Dead-Letter Queue (DLQ) for failed messages.
 - **Performant**: Built with Tokio for asynchronous, non-blocking I/O.
-- **Deduplication**: Prevents processing of duplicate messages within a configurable time window.
-- **Observable**: Emits logs in JSON format for easy integration with modern logging platforms.
+- **Deduplication**: Prevents processing of duplicate messages within a configurable time window when running in single instance mode.
+- **Observable**: Emits logs in JSON format and exposes Prometheus metrics for easy integration with modern monitoring and logging platforms.
 - **Configurable**: Easily configured via a file or environment variables.
 
 ## Getting Started
@@ -74,6 +74,11 @@ log_level: "info"
 sled_path: "/var/data/dedup_db"
 dedup_ttl_seconds: 86400 # 24 hours
 
+# Metrics configuration
+metrics:
+  enabled: true
+  listen_address: "0.0.0.0:9090"
+
 # Define named connections to message brokers
 # Connections are a list, where each item has a unique 'name'.
 connections:
@@ -91,6 +96,10 @@ connections:
   - name: "rabbitmq_prod"
     amqp:
       url: "amqp://user:pass@rabbitmq.example.com:5672"
+  - name: "mqtt_iot"
+    mqtt:
+      url: "tcp://mqtt.example.com:1883"
+      client_id: "bridge-iot-client"
 
 # Dead-Letter Queue (DLQ) configuration
 dlq:
@@ -118,6 +127,15 @@ routes:
       connection: "kafka_eu_west"
       kafka:
         topic: "orders"
+  - name: "nats_to_mqtt_iot"
+    source:
+      connection: "nats_main"
+      nats:
+        subject: "processed.events"
+    sink:
+      connection: "mqtt_iot"
+      mqtt:
+        topic: "iot/data"
 ```
 
 ### Environment Variables
@@ -133,6 +151,10 @@ All configuration parameters can be set via environment variables. This is parti
 ```bash
 # General settings
 export MQ_MULTI_BRIDGE_LOG_LEVEL="info"
+
+# Metrics
+export MQ_MULTI_BRIDGE_METRICS__ENABLED=true
+export MQ_MULTI_BRIDGE_METRICS__LISTEN_ADDRESS="0.0.0.0:9090"
 
 # Connection: kafka_us_east
 export MQ_MULTI_BRIDGE_CONNECTIONS__0__NAME="kafka_us_east"

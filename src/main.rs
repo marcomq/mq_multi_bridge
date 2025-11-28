@@ -4,7 +4,6 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
 // Use the library crate
-use anyhow::Context;
 use mq_multi_bridge::config;
 use mq_multi_bridge::config::load_config;
 use std::net::SocketAddr;
@@ -12,6 +11,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
+use anyhow::Context;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config: config::Config = load_config().context("Failed to load configuration")?;
@@ -35,10 +35,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // --- 2. Initialize Prometheus Metrics Exporter ---
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    let addr: SocketAddr = "0.0.0.0:9090".parse()?;
-    builder.with_http_listener(addr).install()?;
-    info!("Prometheus exporter listening on {}", addr);
+    if config.metrics.enabled {
+        let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+        let addr: SocketAddr = config.metrics.listen_address.parse().context(format!(
+            "Failed to parse metrics listen address: {}",
+            config.metrics.listen_address
+        ))?;
+        builder.with_http_listener(addr).install()?;
+        info!("Prometheus exporter listening on http://{}", addr);
+    }
 
     // --- 3. Create Shutdown Signal Channel ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());

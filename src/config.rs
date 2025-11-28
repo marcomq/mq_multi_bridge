@@ -152,11 +152,13 @@ pub struct Route {
     pub sink: SinkEndpoint,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {
     pub log_level: String,
     pub sled_path: String,
     pub dedup_ttl_seconds: u64,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
     #[serde(default)]
     pub connections: Vec<Connection>,
     pub dlq: Option<DlqConfig>,
@@ -164,6 +166,20 @@ pub struct Config {
     pub routes: Vec<Route>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricsConfig {
+    pub enabled: bool,
+    pub listen_address: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_address: "0.0.0.0:9090".to_string(),
+        }
+    }
+}
 #[derive(Debug, Deserialize, Clone)]
 pub struct DlqConfig {
     pub connection: String,
@@ -180,6 +196,10 @@ mod tests {
 log_level: "debug"
 sled_path: "/tmp/test_db"
 dedup_ttl_seconds: 3600
+
+metrics:
+  enabled: true
+  listen_address: "0.0.0.0:9191"
 
 connections:
   - name: "kafka_main"

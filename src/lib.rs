@@ -29,6 +29,7 @@ use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
 use std::sync::Arc;
+use metrics::{counter, histogram};
 use anyhow::{anyhow, Context};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -256,12 +257,13 @@ async fn run_bridge_instance(
                 match result {
                     Ok((message, commit)) => {
                         let msg_id = message.message_id;
+                        let processing_start = std::time::Instant::now();
                         info!(message_id = %msg_id, "Received message");
-                        // TODO: metrics::increment_counter!("bridge_messages_received", "bridge" => bridge_id.clone());
+                        counter!("bridge_messages_received_total", "route" => bridge_id.clone()).increment(1);
 
                         if dedup_store.is_duplicate(&msg_id).unwrap_or(false) {
                             warn!(message_id = %msg_id, "Duplicate message detected, skipping.");
-                            // TODO: metrics::increment_counter!("bridge_messages_duplicate", "bridge" => bridge_id.clone());
+                            counter!("bridge_messages_duplicate_total", "route" => bridge_id.clone()).increment(1);
                             commit().await; // Commit even if duplicate to remove from source queue
                             continue;
                         }
@@ -272,16 +274,17 @@ async fn run_bridge_instance(
                             attempts += 1;
                             match sink.send(message.clone()).await {
                                 Ok(_) => {
+                                    let duration = processing_start.elapsed();
                                     info!(message_id = %msg_id, "Successfully forwarded message");
-                                    // TODO: metrics::increment_counter!("bridge_messages_sent", "bridge" => bridge_id.clone());
+                                    counter!("bridge_messages_sent_total", "route" => bridge_id.clone()).increment(1);
+                                    histogram!("bridge_message_processing_duration_seconds", "route" => bridge_id.clone()).record(duration.as_secs_f64());
                                     commit().await; // ACK source only after successful sink
                                     break;
                                 }
                                 Err(e) => {
                                     error!(message_id = %msg_id, attempt = attempts, error = %e, "Failed to forward message");
                                     if attempts >= max_attempts {
-                                        error!(message_id = %msg_id, "Exceeded max retries. Sending to DLQ.");
-                                        // TODO: metrics::increment_counter!("bridge_messages_dlq", "bridge" => bridge_id.clone());
+                                        counter!("bridge_messages_dlq_total", "route" => bridge_id.clone()).increment(1);
                                         if let Some(dlq) = &dlq_sink {
                                             if let Err(dlq_err) = dlq.send(message).await {
                                                 error!(message_id = %msg_id, error = %dlq_err, "Failed to send to DLQ!");
@@ -289,6 +292,7 @@ async fn run_bridge_instance(
                                         }
                                         commit().await; // Commit original message after moving to DLQ
                                         break;
+                                    } else {
                                     }
                                     let backoff_duration = Duration::from_secs(2u64.pow(attempts));
                                     warn!(message_id = %msg_id, "Retrying in {:?}", backoff_duration);
@@ -335,8 +339,7 @@ mod tests {
                     }),
                 },
             ],
-            dlq: None,
-            routes: vec![],
+            ..Default::default()
         };
 
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
@@ -362,7 +365,7 @@ mod tests {
                     topic: "my_dlq".to_string(),
                 },
             }),
-            routes: vec![],
+            ..Default::default()
         };
         // This test primarily checks deserialization logic via the config test.
         // A runtime test would require more mocking. Here we just assert the structure.
