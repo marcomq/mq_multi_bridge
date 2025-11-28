@@ -1,20 +1,39 @@
 # MQ Multi Bridge
 
-Bridge between multiple MQ message queues and streams like Kafka and NATS.
+A flexible and resilient message queue bridge written in Rust, designed to connect different messaging systems seamlessly like RabbitMQ, Kafka and NATS..
 
-This project provides a robust, observable, and resilient message bridge written in Rust.
+# Status
+Current status is work in progress. Don't use it without testing and fixing.
 
 ## Features
 
-- **Kafka to NATS Bridge**: Forwards messages from a Kafka topic to a NATS subject.
-- **At-Least-Once Delivery**: Commits/acks a message at the source only after it has been successfully forwarded to the sink.
-- **Deduplication**: Uses an embedded `sled` database to prevent processing of duplicate messages.
-- **Retry & DLQ**: Implements an exponential backoff retry mechanism. After several failed attempts, messages are moved to a Dead-Letter Queue (DLQ in Kafka).
-- **Prometheus Metrics**: Exposes metrics on `/metrics` at port `9090`.
-- **Structured Logging**: JSON-formatted logs using `tracing`.
-- **Configuration**: Fully configurable via environment variables.
+- **Multiple Broker Support**: Connects Kafka, NATS, and AMQP (e.g., RabbitMQ) in any direction.
+- **Resilient**: Includes retry logic with exponential backoff and a Dead-Letter Queue (DLQ) for failed messages.
+- **Performant**: Built with Tokio for asynchronous, non-blocking I/O.
+- **Deduplication**: Prevents processing of duplicate messages within a configurable time window.
+- **Observable**: Emits logs in JSON format for easy integration with modern logging platforms.
+- **Configurable**: Easily configured via a file or environment variables.
 
-## Docker Build and Image (doesn't require local Rust)
+## Getting Started
+
+### Prerequisites
+
+- Rust toolchain (latest stable version recommended)
+- Access to the message brokers you want to connect (e.g., Kafka, NATS, RabbitMQ)
+
+
+## Build
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/marcomq/mq_multi_bridge
+    cd mq_multi_bridge
+    ```
+
+2.  **Configure the application:**
+    Create a `config.yaml` file in the project root or set environment variables. See the Configuration section for details.
+    
+### Build Docker Image (doesn't require local Rust)
 
 1.  **Prerequisites**: Docker and Docker Compose must be installed.
 
@@ -27,26 +46,115 @@ This project provides a robust, observable, and resilient message bridge written
 
     This will start Kafka, NATS, and the bridge application.
 
-3.  **Test the Data Flow (Kafka -> NATS)**
+### Building and Running Locally
 
-    a. **(Optional) Create Kafka Topics**: The bridge expects topics `events-in`, `events-out`, and `events-dlq`. You can create them manually if auto-creation is disabled.
 
-    b. **Produce a message to Kafka**:
-    Open a new terminal and send a JSON message to the `events-in` topic.
+**Build and run the application:**
     ```bash
-    docker-compose exec kafka kafka-console-producer --broker-list kafka:9092 --topic events-in
-    > {"data": "hello world"}
+    cargo run --release
     ```
 
-    c. **Observe Logs**: You should see logs in the `docker-compose` output indicating that the bridge received the message from Kafka and forwarded it to NATS.
+## Configuration
 
-    d. **Check Metrics**: Access `http://localhost:9090/metrics` in your browser to see the Prometheus metrics.
+The application can be configured in three ways, with the following order of precedence (lower numbers are overridden by higher numbers):
 
+1.  **Default Values**: The application has built-in default values for most settings.
+2.  **Configuration File**: A file named `config.[yaml|json|toml]` can be placed in the application's working directory.
+3.  **Environment Variables**: Any setting can be overridden using environment variables.
 
-## Local build (without Docker)
+### Configuration File
 
-You also just use your local rust installation to build and run the binary.
+You can create a configuration file (e.g., `config.yaml`) to specify your settings. This is the recommended approach for managing complex route configurations.
+
+**Example `config.yaml`:**
+
+```yaml
+# General settings
+log_level: "info"
+sled_path: "/var/data/dedup_db"
+dedup_ttl_seconds: 86400 # 24 hours
+
+# Define named connections to message brokers
+# Connections are a list, where each item has a unique 'name'.
+connections:
+  - name: "kafka_us_east"
+    kafka:
+      brokers: "kafka-us.example.com:9092"
+      group_id: "bridge-group-us"
+  - name: "kafka_eu_west"
+    kafka:
+      brokers: "kafka-eu.example.com:9092"
+      group_id: "bridge-group-eu"
+  - name: "nats_main"
+    nats:
+      url: "nats://nats.example.com:4222"
+  - name: "rabbitmq_prod"
+    amqp:
+      url: "amqp://user:pass@rabbitmq.example.com:5672"
+
+# Dead-Letter Queue (DLQ) configuration
+dlq:
+  connection: "kafka_us_east" # Use one of the defined connections
+  kafka:
+    topic: "my-bridge-dlq"
+
+# Define bridge routes from a source to a sink
+routes:
+  - name: "kafka_us_to_nats_events"
+    source:
+      connection: "kafka_us_east"
+      kafka:
+        topic: "raw_events"
+    sink:
+      connection: "nats_main"
+      nats:
+        subject: "processed.events"
+  - name: "amqp_to_kafka_eu_orders"
+    source:
+      connection: "rabbitmq_prod"
+      amqp:
+        queue: "incoming_orders"
+    sink:
+      connection: "kafka_eu_west"
+      kafka:
+        topic: "orders"
+```
+
+### Environment Variables
+
+All configuration parameters can be set via environment variables. This is particularly useful for containerized deployments (e.g., Docker, Kubernetes).
+
+- The variables must be prefixed with `MQ_MULTI_BRIDGE_`.
+- Nested keys are separated by a double underscore `__`.
+- Arrays (like `routes`) are configured using array indexing for each field.
+
+**Example using environment variables:**
 
 ```bash
-cargo run --release
+# General settings
+export MQ_MULTI_BRIDGE_LOG_LEVEL="info"
+
+# Connection: kafka_us_east
+export MQ_MULTI_BRIDGE_CONNECTIONS__0__NAME="kafka_us_east"
+export MQ_MULTI_BRIDGE_CONNECTIONS__0__KAFKA__BROKERS="kafka-us.example.com:9092"
+export MQ_MULTI_BRIDGE_CONNECTIONS__0__KAFKA__GROUP_ID="bridge-group-us"
+
+# Connection: nats_main
+export MQ_MULTI_BRIDGE_CONNECTIONS__1__NAME="nats_main"
+export MQ_MULTI_BRIDGE_CONNECTIONS__1__NATS__URL="nats://nats.example.com:4222"
+
+# Route 0: kafka_us_east -> nats_main
+export MQ_MULTI_BRIDGE_ROUTES__0__NAME="kafka_us_to_nats_events"
+export MQ_MULTI_BRIDGE_ROUTES__0__SOURCE__CONNECTION="kafka_us_east"
+export MQ_MULTI_BRIDGE_ROUTES__0__SOURCE__KAFKA__TOPIC="raw_events"
+export MQ_MULTI_BRIDGE_ROUTES__0__SINK__CONNECTION="nats_main"
+export MQ_MULTI_BRIDGE_ROUTES__0__SINK__NATS__SUBJECT="processed.events"
 ```
+
+### Using a `.env` file
+
+For local development, you can place a `.env` file in the root of the project. The application will automatically load the variables from this file.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

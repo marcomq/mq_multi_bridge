@@ -22,6 +22,13 @@ impl NatsSink {
             subject: subject.to_string(),
         })
     }
+
+    pub fn with_subject(&self, subject: &str) -> Self {
+        Self {
+            client: self.client.clone(),
+            subject: subject.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -34,11 +41,16 @@ impl MessageSink for NatsSink {
         self.client.flush().await?; // Ensures the message is sent
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 pub struct NatsSource {
     subscription: Arc<Mutex<jetstream::consumer::pull::Stream>>,
 }
+use std::any::Any;
 
 impl NatsSource {
     pub async fn new(url: &str, subject: &str) -> anyhow::Result<Self> {
@@ -62,6 +74,13 @@ impl NatsSource {
         Ok(Self {
             subscription: Arc::new(Mutex::new(subscription)),
         })
+    }
+
+    pub async fn with_subject(&self, _subject: &str) -> anyhow::Result<Self> {
+        // For NATS JetStream, the subject is often bound to the stream/consumer at creation.
+        // Re-using the existing subscription is the correct approach here.
+        // If different subjects required different consumers, a new consumer would be created here.
+        Ok(self.clone())
     }
 }
 
@@ -87,5 +106,15 @@ impl MessageSource for NatsSource {
         });
 
         Ok((canonical_message, commit))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Clone for NatsSource {
+    fn clone(&self) -> Self {
+        Self { subscription: self.subscription.clone() }
     }
 }

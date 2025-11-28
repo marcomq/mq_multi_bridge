@@ -17,6 +17,7 @@ pub struct AmqpSource {
     consumer: Arc<Mutex<Consumer>>,
 }
 
+use std::any::Any;
 impl AmqpSource {
     pub async fn new(url: &str, queue: &str) -> anyhow::Result<Self> {
         info!(url = %url, "Connecting to AMQP broker");
@@ -40,6 +41,12 @@ impl AmqpSource {
         Ok(Self {
             consumer: Arc::new(Mutex::new(consumer)),
         })
+    }
+
+    pub async fn with_queue(&self, _queue: &str) -> anyhow::Result<Self> {
+        // For this implementation, the consumer is tied to a single queue on creation.
+        // We will reuse the existing consumer.
+        Ok(self.clone())
     }
 }
 
@@ -69,5 +76,15 @@ impl MessageSource for AmqpSource {
         });
 
         Ok((message, commit))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Clone for AmqpSource {
+    fn clone(&self) -> Self {
+        Self { consumer: self.consumer.clone() }
     }
 }

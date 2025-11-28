@@ -30,6 +30,13 @@ impl KafkaSink {
             topic: topic.to_string(),
         })
     }
+
+    pub fn with_topic(&self, topic: &str) -> Self {
+        Self {
+            producer: self.producer.clone(),
+            topic: topic.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -45,11 +52,16 @@ impl MessageSink for KafkaSink {
             .map_err(|(e, _)| e)?;
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 pub struct KafkaSource {
     consumer: Arc<Mutex<StreamConsumer>>,
 }
+use std::any::Any;
 
 impl KafkaSource {
     pub fn new(
@@ -71,6 +83,16 @@ impl KafkaSource {
         Ok(Self {
             consumer: Arc::new(Mutex::new(consumer)),
         })
+    }
+
+    pub fn with_topic(&self, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+        let new_source = self.clone();
+        {
+            let consumer = new_source.consumer.blocking_lock();
+            consumer.subscribe(&[topic])?;
+        }
+        info!(topic = %topic, "Kafka source subscribed to new topic");
+        Ok(new_source)
     }
 }
 
@@ -106,5 +128,15 @@ impl MessageSource for KafkaSource {
         });
 
         Ok((canonical_message, commit))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Clone for KafkaSource {
+    fn clone(&self) -> Self {
+        Self { consumer: self.consumer.clone() }
     }
 }

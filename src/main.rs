@@ -29,6 +29,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting MQ Multi Bridge application");
 
+    if config.routes.is_empty() {
+        warn!("No routes configured. Application will not bridge any messages. Exiting.");
+        return Ok(());
+    }
+
     // --- 2. Initialize Prometheus Metrics Exporter ---
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
     let addr: SocketAddr = "0.0.0.0:9090".parse()?;

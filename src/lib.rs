@@ -12,10 +12,13 @@ pub mod sinks;
 pub mod sources;
 pub mod store;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::amqp::AmqpSource;
-use crate::config::Config;
-use crate::config::{AmqpEndpoint, KafkaEndpoint, NatsEndpoint, SinkEndpoint, SourceEndpoint};
+use crate::config::{
+    AmqpConfig, AmqpEndpoint, Config, ConnectionType, KafkaConfig, KafkaEndpoint, NatsConfig,
+    NatsEndpoint, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType,
+};
 use crate::kafka::KafkaSink;
 use crate::nats::NatsSink;
 use crate::nats::NatsSource;
@@ -23,6 +26,7 @@ use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
 use std::sync::Arc;
+use anyhow::{anyhow, Context};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
@@ -42,38 +46,60 @@ pub async fn run(
         config.dedup_ttl_seconds,
     )?);
 
-    // --- Create a single DLQ sink ---
-    let dlq_sink: Arc<dyn MessageSink + Send + Sync> = Arc::new(KafkaSink::new(
-        &config.kafka.brokers,
-        &config.dlq.kafka.topic,
-    )?);
-
-    // --- Create Sources and Sinks based on config ---
-    // We use HashMaps to avoid creating duplicate connections for the same broker.
+    // --- Create connections ---
     let mut sources: HashMap<String, Arc<dyn MessageSource + Send + Sync>> = HashMap::new();
     let mut sinks: HashMap<String, Arc<dyn MessageSink + Send + Sync>> = HashMap::new();
+    let mut connection_names = HashSet::new();
+
+    for conn in &config.connections {
+        if !connection_names.insert(conn.name.clone()) {
+            return Err(anyhow!("Duplicate connection name found: {}", conn.name));
+        }
+        match &conn.connection_type {
+            ConnectionType::Kafka(kafka_config) => {
+                // A Kafka connection can be both a source and a sink
+                let source = create_kafka_source(kafka_config, "").await?; // Topic will be set per-route
+                sources.insert(conn.name.clone(), source);
+                let sink = create_kafka_sink(kafka_config, "").await?; // Topic will be set per-route
+                sinks.insert(conn.name.clone(), sink);
+            }
+            ConnectionType::Nats(nats_config) => {
+                let sink = create_nats_sink(nats_config, "").await?;
+                sinks.insert(conn.name.clone(), sink);
+                let source = create_nats_source(nats_config, "").await?;
+                sources.insert(conn.name.clone(), source);
+            }
+            ConnectionType::Amqp(amqp_config) => {
+                let source = create_amqp_source(amqp_config, "").await?;
+                sources.insert(conn.name.clone(), source);
+                // AMQP sink not implemented, but would be added here
+            }
+        }
+    }
+
+    // --- Create a DLQ sink if configured ---
+    let dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>> = if let Some(dlq_config) = &config.dlq {
+        let dlq_conn_sink = sinks.get(&dlq_config.connection).with_context(|| {
+            format!(
+                "DLQ connection '{}' not found in defined connections",
+                dlq_config.connection
+            )
+        })?;
+        let kafka_sink = dlq_conn_sink
+            .as_any()
+            .downcast_ref::<KafkaSink>()
+            .ok_or_else(|| anyhow!("DLQ connection must be of type Kafka"))?;
+        Some(Arc::new(kafka_sink.with_topic(&dlq_config.kafka.topic)))
+    } else {
+        None
+    };
+
+    // --- Create Sources and Sinks based on config ---
     let mut bridge_tasks = Vec::new();
 
     for route in &config.routes {
-        let source_key = serde_json::to_string(&route.source)?;
-        let source = match sources.get(&source_key) {
-            Some(s) => s.clone(),
-            None => {
-                let new_source = create_source(&config, &route.source).await?;
-                sources.insert(source_key, new_source.clone());
-                new_source
-            }
-        };
-
-        let sink_key = serde_json::to_string(&route.sink)?;
-        let sink = match sinks.get(&sink_key) {
-            Some(s) => s.clone(),
-            None => {
-                let new_sink = create_sink(&config, &route.sink).await?;
-                sinks.insert(sink_key, new_sink.clone());
-                new_sink
-            }
-        };
+        let source = create_source_from_route(&sources, &route.source).await?;
+        let sink = create_sink_from_route(&sinks, &route.sink).await?;
 
         let bridge_task = run_bridge_instance(
             route.name.clone(),
@@ -97,47 +123,90 @@ pub async fn run(
     Ok(())
 }
 
-async fn create_source(
-    config: &Config,
+async fn create_source_from_route(
+    sources: &HashMap<String, Arc<dyn MessageSource + Send + Sync>>,
     endpoint: &SourceEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    match endpoint {
-        SourceEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(
-            crate::kafka::KafkaSource::new(&config.kafka.brokers, &config.kafka.group_id, topic)?,
-        )),
-        SourceEndpoint::Nats(NatsEndpoint { subject }) => {
-            Ok(Arc::new(NatsSource::new(&config.nats.url, subject).await?))
+    let conn_source = sources
+        .get(&endpoint.connection)
+        .with_context(|| format!("Source connection '{}' not found", endpoint.connection))?;
+
+    match &endpoint.endpoint_type {
+        SourceEndpointType::Kafka(KafkaEndpoint { topic }) => {
+            let kafka_source = conn_source
+                .as_any()
+                .downcast_ref::<crate::kafka::KafkaSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka source", endpoint.connection))?;
+            Ok(Arc::new(kafka_source.with_topic(topic)?))
         }
-        SourceEndpoint::Amqp(AmqpEndpoint { queue }) => {
-            Ok(Arc::new(AmqpSource::new(&config.amqp.url, queue).await?))
+        SourceEndpointType::Nats(NatsEndpoint { subject }) => {
+            let nats_source = conn_source
+                .as_any()
+                .downcast_ref::<NatsSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a NATS source", endpoint.connection))?;
+            Ok(Arc::new(nats_source.with_subject(subject).await?))
+        }
+        SourceEndpointType::Amqp(AmqpEndpoint { queue }) => {
+            let amqp_source = conn_source
+                .as_any()
+                .downcast_ref::<AmqpSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not an AMQP source", endpoint.connection))?;
+            Ok(Arc::new(amqp_source.with_queue(queue).await?))
         }
     }
 }
 
-async fn create_sink(
-    config: &Config,
+async fn create_sink_from_route(
+    sinks: &HashMap<String, Arc<dyn MessageSink + Send + Sync>>,
     endpoint: &SinkEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    match endpoint {
-        SinkEndpoint::Kafka(KafkaEndpoint { topic }) => {
-            Ok(Arc::new(KafkaSink::new(&config.kafka.brokers, topic)?))
+    let conn_sink = sinks
+        .get(&endpoint.connection)
+        .with_context(|| format!("Sink connection '{}' not found", endpoint.connection))?;
+
+    match &endpoint.endpoint_type {
+        SinkEndpointType::Kafka(KafkaEndpoint { topic }) => {
+            let kafka_sink = conn_sink
+                .as_any()
+                .downcast_ref::<KafkaSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka sink", endpoint.connection))?;
+            Ok(Arc::new(kafka_sink.with_topic(topic)))
         }
-        SinkEndpoint::Nats(NatsEndpoint { subject }) => {
-            Ok(Arc::new(NatsSink::new(&config.nats.url, subject).await?))
+        SinkEndpointType::Nats(NatsEndpoint { subject }) => {
+            let nats_sink = conn_sink
+                .as_any()
+                .downcast_ref::<NatsSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a NATS sink", endpoint.connection))?;
+            Ok(Arc::new(nats_sink.with_subject(subject)))
         }
-        // Note: AMQP sink implementation is assumed to exist and be similar.
-        // If it doesn't exist, this would need to be created.
-        SinkEndpoint::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
+        SinkEndpointType::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
     }
 }
+
+async fn create_kafka_source(config: &KafkaConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(crate::kafka::KafkaSource::new(&config.brokers, &config.group_id, topic)?))
+}
+async fn create_kafka_sink(config: &KafkaConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(KafkaSink::new(&config.brokers, topic)?))
+}
+async fn create_nats_source(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(NatsSource::new(&config.url, subject).await?))
+}
+async fn create_nats_sink(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(NatsSink::new(&config.url, subject).await?))
+}
+async fn create_amqp_source(config: &AmqpConfig, queue: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(AmqpSource::new(&config.url, queue).await?))
+}
+
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]
 async fn run_bridge_instance(
     bridge_id: String,
     source: Arc<dyn MessageSource + Send + Sync>,
     sink: Arc<dyn MessageSink + Send + Sync>,
-    dedup_store: Arc<DeduplicationStore>,
-    dlq_sink: Arc<dyn MessageSink + Send + Sync>,
+    dedup_store: Arc<DeduplicationStore>, // Assuming this is still needed
+    dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
@@ -179,8 +248,10 @@ async fn run_bridge_instance(
                                     if attempts >= max_attempts {
                                         error!(message_id = %msg_id, "Exceeded max retries. Sending to DLQ.");
                                         // TODO: metrics::increment_counter!("bridge_messages_dlq", "bridge" => bridge_id.clone());
-                                        if let Err(dlq_err) = dlq_sink.send(message).await {
-                                            error!(message_id = %msg_id, error = %dlq_err, "Failed to send to DLQ!");
+                                        if let Some(dlq) = &dlq_sink {
+                                            if let Err(dlq_err) = dlq.send(message).await {
+                                                error!(message_id = %msg_id, error = %dlq_err, "Failed to send to DLQ!");
+                                            }
                                         }
                                         commit().await; // Commit original message after moving to DLQ
                                         break;
