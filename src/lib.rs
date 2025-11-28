@@ -7,6 +7,7 @@ pub mod amqp;
 pub mod config;
 pub mod kafka;
 pub mod model;
+pub mod mqtt;
 pub mod nats;
 pub mod sinks;
 pub mod sources;
@@ -16,10 +17,12 @@ use std::collections::HashSet;
 
 use crate::amqp::AmqpSource;
 use crate::config::{
-    AmqpConfig, AmqpEndpoint, Config, ConnectionType, KafkaConfig, KafkaEndpoint, NatsConfig,
-    NatsEndpoint, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType,
+    AmqpConfig, AmqpEndpoint, Config, ConnectionType, KafkaConfig, KafkaEndpoint, MqttConfig,
+    MqttEndpoint, NatsConfig, NatsEndpoint, SinkEndpoint,
+    SinkEndpointType, SourceEndpoint, SourceEndpointType,
 };
 use crate::kafka::KafkaSink;
+use crate::mqtt::{MqttSink, MqttSource};
 use crate::nats::NatsSink;
 use crate::nats::NatsSource;
 use crate::sinks::MessageSink;
@@ -76,6 +79,12 @@ pub async fn run(
                 let source = create_amqp_source(amqp_config, "").await?;
                 sources.insert(conn.name.clone(), source);
                 // AMQP sink not implemented, but would be added here
+            }
+            ConnectionType::Mqtt(mqtt_config) => {
+                let source = create_mqtt_source(mqtt_config, "").await?;
+                sources.insert(conn.name.clone(), source);
+                let sink = create_mqtt_sink(mqtt_config, "").await?;
+                sinks.insert(conn.name.clone(), sink);
             }
         }
     }
@@ -156,6 +165,13 @@ async fn create_source_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not an AMQP source", endpoint.connection))?;
             Ok(Arc::new(amqp_source.with_queue(queue).await?))
         }
+        SourceEndpointType::Mqtt(MqttEndpoint { topic }) => {
+            let mqtt_source = conn_source
+                .as_any()
+                .downcast_ref::<MqttSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT source", endpoint.connection))?;
+            Ok(Arc::new(mqtt_source.with_topic(topic).await?))
+        }
     }
 }
 
@@ -183,6 +199,13 @@ async fn create_sink_from_route(
             Ok(Arc::new(nats_sink.with_subject(subject)))
         }
         SinkEndpointType::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
+        SinkEndpointType::Mqtt(MqttEndpoint { topic }) => {
+            let mqtt_sink = conn_sink
+                .as_any()
+                .downcast_ref::<MqttSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT sink", endpoint.connection))?;
+            Ok(Arc::new(mqtt_sink.with_topic(topic)))
+        }
     }
 }
 
@@ -201,6 +224,14 @@ async fn create_nats_sink(config: &NatsConfig, subject: &str) -> anyhow::Result<
 async fn create_amqp_source(config: &AmqpConfig, queue: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     Ok(Arc::new(AmqpSource::new(config, queue).await?))
 }
+async fn create_mqtt_source(config: &MqttConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(MqttSource::new(config, topic).await?))
+}
+async fn create_mqtt_sink(config: &MqttConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(MqttSink::new(config, topic).await?))
+}
+
+
 
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]

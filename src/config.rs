@@ -45,12 +45,20 @@ pub struct AmqpConfig {
     pub tls: TlsConfig,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct MqttConfig {
+    pub url: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionType {
     Kafka(KafkaConfig),
     Nats(NatsConfig),
     Amqp(AmqpConfig),
+    Mqtt(MqttConfig),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -68,7 +76,12 @@ pub struct AmqpEndpoint {
     pub queue: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MqttEndpoint {
+    pub topic: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub struct SourceEndpoint {
     pub connection: String,
@@ -76,12 +89,13 @@ pub struct SourceEndpoint {
     pub endpoint_type: SourceEndpointType,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceEndpointType {
     Kafka(KafkaEndpoint),
     Nats(NatsEndpoint),
     Amqp(AmqpEndpoint),
+    Mqtt(MqttEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -128,6 +142,7 @@ pub enum SinkEndpointType {
     Kafka(KafkaEndpoint),
     Nats(NatsEndpoint),
     Amqp(AmqpEndpoint),
+    Mqtt(MqttEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]

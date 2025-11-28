@@ -25,14 +25,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Messaging Clients
+async-nats = "0.35.0"
 rdkafka = { version = "0.38", features = ["tokio"] }
-futures = "0.3.30"
-async-trait = "0.1"
 lapin = { version = "3.7", features = ["rustls"] }
+rumqttc = { version = "0.24" }
+
+futures = "0.3.30"
+url = "2.5"
+async-trait = "0.1"
 rustls-pemfile = "2.2"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
-async-nats = "0.35.0"
 
 # Data & Serialization
 serde_json = "1.0"
@@ -44,7 +47,7 @@ sled = "0.34"
 # Metrics
 metrics = { version = "0.24" }
 metrics-exporter-prometheus = "0.18"
+fastrand = "2.1.0"
 
 [dev-dependencies]
 serde_yaml = "0.9"
-fastrand = "2.0"
