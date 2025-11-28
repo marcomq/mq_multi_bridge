@@ -1,0 +1,5 @@
+# This file provides persistent configuration for Cargo builds.
+# We set CMAKE_ARGS to pass a required flag to the cmake build process
+# used by the `mqi` crate, ensuring it's compatible with modern cmake versions.
+[env]
+CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"

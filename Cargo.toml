@@ -51,3 +51,6 @@ fastrand = "2.1.0"
 
 [dev-dependencies]
 serde_yaml = "0.9"
+
+[features]
+default = []
