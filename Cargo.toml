@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "mq_multi_bridge"
+name = "mq_multi_bridge_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mq_multi_bridge_app"
+name = "mq_multi_bridge"
 path = "src/main.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -51,6 +52,7 @@ fastrand = "2.1.0"
 
 [dev-dependencies]
 serde_yaml = "0.9"
+tempfile = "3.10"
 
 [features]
 default = []

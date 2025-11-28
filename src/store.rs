@@ -48,3 +48,46 @@ impl DeduplicationStore {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_is_duplicate_new_and_seen() {
+        let dir = tempdir().unwrap();
+        let store = DeduplicationStore::new(dir.path(), 60).unwrap();
+        let message_id = Uuid::new_v4();
+
+        // First time seeing this ID, should not be a duplicate
+        assert!(!store.is_duplicate(&message_id).unwrap());
+
+        // Second time, should be a duplicate
+        assert!(store.is_duplicate(&message_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_is_duplicate_ttl_expiration() {
+        let dir = tempdir().unwrap();
+        let ttl_seconds = 2;
+        let store = DeduplicationStore::new(dir.path(), ttl_seconds).unwrap();
+        let message_id = Uuid::new_v4();
+
+        // First time, not a duplicate
+        assert!(!store.is_duplicate(&message_id).unwrap());
+
+        // Immediately after, it is a duplicate
+        assert!(store.is_duplicate(&message_id).unwrap());
+
+        // Wait for the TTL to expire
+        tokio::time::sleep(Duration::from_secs(ttl_seconds + 1)).await;
+
+        // After TTL, it should no longer be considered a duplicate
+        assert!(!store.is_duplicate(&message_id).unwrap());
+
+        // And now it should be a duplicate again, since it was re-inserted
+        assert!(store.is_duplicate(&message_id).unwrap());
+    }
+}
