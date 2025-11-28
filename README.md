@@ -1,6 +1,6 @@
 # MQ Multi Bridge
 
-A flexible and resilient message queue bridge written in Rust, designed to connect different messaging systems seamlessly like RabbitMQ, Kafka and NATS..
+A flexible and resilient message queue bridge written in Rust, designed to connect different messaging systems seamlessly like RabbitMQ, Kafka and NATS.
 
 # Status
 Current status is work in progress. Don't use it without testing and fixing.

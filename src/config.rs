@@ -123,6 +123,65 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 pub struct DlqConfig {
     pub connection: String,
-    #[serde(flatten)]
     pub kafka: KafkaEndpoint,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_deserialization() {
+        let yaml_config = r#"
+log_level: "debug"
+sled_path: "/tmp/test_db"
+dedup_ttl_seconds: 3600
+
+connections:
+  - name: "kafka_main"
+    kafka:
+      brokers: "kafka:9092"
+      group_id: "bridge_group"
+  - name: "nats_main"
+    nats:
+      url: "nats://nats:4222"
+
+dlq:
+  connection: "kafka_main"
+  # The topic must be nested under the endpoint type, 'kafka' in this case.
+  kafka: 
+    topic: "my_dlq" 
+
+routes:
+  - name: "kafka_to_nats"
+    source:
+      connection: "kafka_main"
+      kafka:
+        topic: "in_topic"
+    sink:
+      connection: "nats_main"
+      nats:
+        subject: "out_subject"
+"#;
+
+        let config: Result<Config, _> = serde_yaml::from_str(yaml_config);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.connections.len(), 2);
+        assert_eq!(config.routes.len(), 1);
+        assert!(config.dlq.is_some());
+
+        let kafka_conn = config.connections.iter().find(|c| c.name == "kafka_main").unwrap();
+        if let ConnectionType::Kafka(kafka_config) = &kafka_conn.connection_type {
+            assert_eq!(kafka_config.brokers, "kafka:9092");
+        } else {
+            panic!("Expected Kafka connection");
+        }
+
+        let route = &config.routes[0];
+        assert_eq!(route.name, "kafka_to_nats");
+        assert_eq!(route.source.connection, "kafka_main");
+    }
 }

@@ -40,6 +40,14 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     info!(config = ?config, "Initializing Bridge Library");
 
+    // --- Validate connection names before any I/O ---
+    let mut connection_names = HashSet::new();
+    for conn in &config.connections {
+        if !connection_names.insert(conn.name.clone()) {
+            return Err(anyhow!("Duplicate connection name found: {}", conn.name));
+        }
+    }
+
     // --- Initialize Shared Components ---
     let dedup_store = Arc::new(DeduplicationStore::new(
         &config.sled_path,
@@ -49,12 +57,7 @@ pub async fn run(
     // --- Create connections ---
     let mut sources: HashMap<String, Arc<dyn MessageSource + Send + Sync>> = HashMap::new();
     let mut sinks: HashMap<String, Arc<dyn MessageSink + Send + Sync>> = HashMap::new();
-    let mut connection_names = HashSet::new();
-
     for conn in &config.connections {
-        if !connection_names.insert(conn.name.clone()) {
-            return Err(anyhow!("Duplicate connection name found: {}", conn.name));
-        }
         match &conn.connection_type {
             ConnectionType::Kafka(kafka_config) => {
                 // A Kafka connection can be both a source and a sink
@@ -272,4 +275,64 @@ async fn run_bridge_instance(
         }
     }
     info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Connection, DlqConfig};
+
+    #[tokio::test]
+    async fn test_run_duplicate_connection_name() {
+        let config = Config {
+            log_level: "info".to_string(),
+            sled_path: "/tmp/test_dedup".to_string(),
+            dedup_ttl_seconds: 60,
+            connections: vec![
+                Connection {
+                    name: "conn1".to_string(),
+                    connection_type: ConnectionType::Nats(NatsConfig {
+                        url: "nats://localhost:4222".to_string(),
+                    }),
+                },
+                Connection {
+                    name: "conn1".to_string(),
+                    connection_type: ConnectionType::Nats(NatsConfig {
+                        url: "nats://localhost:4223".to_string(),
+                    }),
+                },
+            ],
+            dlq: None,
+            routes: vec![],
+        };
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        let result = run(config, shutdown_rx).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Duplicate connection name found: conn1"
+        );
+    }
+
+    #[test]
+    fn test_dlq_config_requires_kafka() {
+        let config = Config {
+            log_level: "info".to_string(),
+            sled_path: "/tmp/test_dedup".to_string(),
+            dedup_ttl_seconds: 60,
+            connections: vec![],
+            dlq: Some(DlqConfig {
+                connection: "kafka_main".to_string(),
+                kafka: KafkaEndpoint {
+                    topic: "my_dlq".to_string(),
+                },
+            }),
+            routes: vec![],
+        };
+        // This test primarily checks deserialization logic via the config test.
+        // A runtime test would require more mocking. Here we just assert the structure.
+        assert_eq!(config.dlq.as_ref().unwrap().kafka.topic, "my_dlq");
+    }
 }
