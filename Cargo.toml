@@ -1,0 +1,43 @@
+[package]
+name = "mq_multi_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mq_multi_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mq_multi_bridge_app"
+path = "src/main.rs"
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+config = { version = "0.15" }
+dotenvy = "0.15"
+anyhow = "1.0"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Messaging Clients
+rdkafka = { version = "0.36", features = ["tokio"] }
+futures = "0.3"
+async-trait = "0.1"
+lapin = "2.3.1"
+async-nats = "0.34"
+
+# Data & Serialization
+serde_json = "1.0"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+
+# Storage for Deduplication
+sled = "0.34"
+
+# Metrics
+metrics = { version = "0.24" }
+metrics-exporter-prometheus = "0.13"
