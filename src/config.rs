@@ -23,6 +23,7 @@ pub struct TlsConfig {
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct NatsConfig {
     pub url: String,
+    pub default_stream: Option<String>,
     #[serde(default)]
     pub tls: NatsTlsConfig,
 }
@@ -69,6 +70,7 @@ pub struct KafkaEndpoint {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct NatsEndpoint {
     pub subject: String,
+    pub stream: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]

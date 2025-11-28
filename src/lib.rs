@@ -73,7 +73,7 @@ pub async fn run(
             ConnectionType::Nats(nats_config) => {
                 let sink = create_nats_sink(nats_config, "").await?;
                 sinks.insert(conn.name.clone(), sink);
-                let source = create_nats_source(nats_config, "").await?;
+                let source = create_nats_source(nats_config, "").await?; // Stream name is set per-route
                 sources.insert(conn.name.clone(), source);
             }
             ConnectionType::Amqp(amqp_config) => {
@@ -111,7 +111,7 @@ pub async fn run(
     let mut bridge_tasks = Vec::new();
 
     for route in &config.routes {
-        let source = create_source_from_route(&sources, &route.source).await?;
+        let source = create_source_from_route(&config, &sources, &route.source).await?;
         let sink = create_sink_from_route(&sinks, &route.sink).await?;
 
         let bridge_task = run_bridge_instance(
@@ -137,6 +137,7 @@ pub async fn run(
 }
 
 async fn create_source_from_route(
+    config: &Config,
     sources: &HashMap<String, Arc<dyn MessageSource + Send + Sync>>,
     endpoint: &SourceEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
@@ -152,12 +153,24 @@ async fn create_source_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka source", endpoint.connection))?;
             Ok(Arc::new(kafka_source.with_topic(topic)?))
         }
-        SourceEndpointType::Nats(NatsEndpoint { subject }) => {
+        SourceEndpointType::Nats(NatsEndpoint { subject, stream }) => {
+            // Get the base NATS connection config
+            let conn_config = config
+                .connections
+                .iter()
+                .find(|c| c.name == endpoint.connection)
+                .and_then(|c| match &c.connection_type {
+                    ConnectionType::Nats(nc) => Some(nc),
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow!("NATS connection '{}' not found or is not a NATS connection type", endpoint.connection))?;
+
             let nats_source = conn_source
                 .as_any()
                 .downcast_ref::<NatsSource>()
                 .ok_or_else(|| anyhow!("Connection '{}' is not a NATS source", endpoint.connection))?;
-            Ok(Arc::new(nats_source.with_subject(subject).await?))
+
+            Ok(Arc::new(nats_source.with_subject_and_stream(subject, stream, conn_config).await?))
         }
         SourceEndpointType::Amqp(AmqpEndpoint { queue }) => {
             let amqp_source = conn_source
@@ -192,7 +205,7 @@ async fn create_sink_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka sink", endpoint.connection))?;
             Ok(Arc::new(kafka_sink.with_topic(topic)))
         }
-        SinkEndpointType::Nats(NatsEndpoint { subject }) => {
+        SinkEndpointType::Nats(NatsEndpoint { subject, stream: _ }) => { // Stream is not needed for sink
             let nats_sink = conn_sink
                 .as_any()
                 .downcast_ref::<NatsSink>()
@@ -216,8 +229,8 @@ async fn create_kafka_source(config: &KafkaConfig, topic: &str) -> anyhow::Resul
 async fn create_kafka_sink(config: &KafkaConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     Ok(Arc::new(KafkaSink::new(config, topic)?))
 }
-async fn create_nats_source(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(NatsSource::new(config, subject).await?))
+async fn create_nats_source(config: &NatsConfig, stream: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(NatsSource::new(config, stream).await?))
 }
 async fn create_nats_sink(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     Ok(Arc::new(NatsSink::new(config, subject).await?))
