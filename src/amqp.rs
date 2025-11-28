@@ -66,7 +66,7 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
     let identity = if let Some(pkcs12_file) = &config.tls.cert_file {
         let der = tokio::fs::read(pkcs12_file).await?;
         let password = config.tls.cert_password.clone().unwrap_or_default();
-        Some(OwnedIdentity { der, password })
+        Some(OwnedIdentity::PKCS12 { der, password })
     } else {
         None
     };

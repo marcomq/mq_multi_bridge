@@ -140,20 +140,23 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     let mut root_store = rustls::RootCertStore::empty();
     if let Some(ca_file) = &config.tls.ca_file {
         let mut pem = BufReader::new(std::fs::File::open(ca_file)?);
-        let certs = rustls_pemfile::certs(&mut pem)?;
-        root_store.add_parsable_certificates(certs.into_iter().map(CertificateDer::from));
+        for cert in rustls_pemfile::certs(&mut pem) {
+            root_store.add(cert?.into())?;
+        }
     }
 
     let mut client_auth_certs = Vec::new();
     if let Some(cert_file) = &config.tls.cert_file {
         let mut pem = BufReader::new(std::fs::File::open(cert_file)?);
-        client_auth_certs = rustls_pemfile::certs(&mut pem)?.into_iter().map(CertificateDer::from).collect();
+        for cert in rustls_pemfile::certs(&mut pem) {
+            client_auth_certs.push(cert?.into());
+        }
     }
 
     let mut client_auth_key = None;
     if let Some(key_file) = &config.tls.key_file {
         let key_bytes = tokio::fs::read(key_file).await?;
-        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())?;
+        let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice()).collect::<Result<_,_>>()?;
         if !keys.is_empty() {
             client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0).into()));
         }
@@ -161,11 +164,10 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
 
     let provider = rustls_ring::default_provider();
 
-    let mut tls_config = ClientConfig::builder_with_provider(provider.clone().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
+    let mut tls_config = ClientConfig::builder_with_provider(Arc::new(provider.clone()))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(root_store)
-        .with_client_auth_cert(client_auth_certs, client_auth_key.unwrap())?;
+        .with_client_auth_cert(client_auth_certs, client_auth_key.ok_or_else(|| anyhow!("Client key is required but not found or invalid"))?)?;
 
     if config.tls.accept_invalid_certs {
         #[derive(Debug)]

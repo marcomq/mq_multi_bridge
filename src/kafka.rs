@@ -63,9 +63,9 @@ impl MessageSink for KafkaSink {
         let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
 
         self.producer
-            .send(record, Duration::from_secs(0))
+            .send(record, Duration::from_secs(5))
             .await
-            .map_err(|(e, _)| e)?;
+            .map_err(|(e, _)| anyhow!("Kafka send error: {}", e))?;
         Ok(())
     }
 
