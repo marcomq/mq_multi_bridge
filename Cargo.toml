@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "mq_multi_bridge_lib"
+name = "mq_multi_bridge"
 path = "src/lib.rs"
 
 [[bin]]
 name = "mq_multi_bridge"
 path = "src/main.rs"
+
+[profile.release]
+# Link-Time Optimization.
+lto = true
+# Abort on panic to reduce binary size.
+panic = "abort"
 
 [dependencies]
 # Async runtime
