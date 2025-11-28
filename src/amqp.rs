@@ -1,17 +1,71 @@
 use crate::model::CanonicalMessage;
 use crate::config::AmqpConfig;
+use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::StreamExt;
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, BasicQosOptions, QueueDeclareOptions},
-    types::FieldTable, Connection, ConnectionProperties, Consumer,
+    options::{
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
+        QueueDeclareOptions,
+    },
+    types::FieldTable,
+    BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+
+pub struct AmqpSink {
+    channel: Channel,
+    exchange: String,
+    routing_key: String,
+}
+
+impl AmqpSink {
+    pub async fn new(config: &AmqpConfig) -> anyhow::Result<Self> {
+        let conn = create_amqp_connection(config).await?;
+        let channel = conn.create_channel().await?;
+
+        Ok(Self {
+            channel,
+            exchange: "".to_string(),    // Default exchange
+            routing_key: "".to_string(), // To be set by the route
+        })
+    }
+
+    pub fn with_routing_key(&self, routing_key: &str) -> Self {
+        Self {
+            channel: self.channel.clone(),
+            exchange: self.exchange.clone(),
+            routing_key: routing_key.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl MessageSink for AmqpSink {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+        let payload = serde_json::to_vec(&message)?;
+        self.channel
+            .basic_publish(
+                &self.exchange,
+                &self.routing_key,
+                BasicPublishOptions::default(),
+                &payload,
+                BasicProperties::default(),
+            )
+            .await?
+            .await?; // Wait for publisher confirm
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 pub struct AmqpSource {
     consumer: Arc<Mutex<Consumer>>,
@@ -20,15 +74,7 @@ pub struct AmqpSource {
 use std::any::Any;
 impl AmqpSource {
     pub async fn new(config: &AmqpConfig, queue: &str) -> anyhow::Result<Self> {
-        info!(url = %config.url, "Connecting to AMQP broker");
-        
-        let conn_props = ConnectionProperties::default();
-        let conn = if config.tls.required {
-            let tls_config = build_tls_config(config).await?;
-            Connection::connect_with_config(&config.url, conn_props, tls_config).await?
-        } else {
-            Connection::connect(&config.url, conn_props).await?
-        };
+        let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
 
         info!(queue = %queue, "Declaring AMQP queue");
@@ -58,6 +104,18 @@ impl AmqpSource {
         // We will reuse the existing consumer.
         Ok(self.clone())
     }
+}
+
+async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connection> {
+    info!(url = %config.url, "Connecting to AMQP broker");
+    let conn_props = ConnectionProperties::default();
+    let conn = if config.tls.required {
+        let tls_config = build_tls_config(config).await?;
+        Connection::connect_with_config(&config.url, conn_props, tls_config).await?
+    } else {
+        Connection::connect(&config.url, conn_props).await?
+    };
+    Ok(conn)
 }
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {

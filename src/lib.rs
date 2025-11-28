@@ -15,7 +15,7 @@ pub mod store;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::amqp::AmqpSource;
+use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
     AmqpConfig, AmqpEndpoint, Config, ConnectionType, KafkaConfig, KafkaEndpoint, MqttConfig,
     MqttEndpoint, NatsConfig, NatsEndpoint, SinkEndpoint,
@@ -79,7 +79,8 @@ pub async fn run(
             ConnectionType::Amqp(amqp_config) => {
                 let source = create_amqp_source(amqp_config, "").await?;
                 sources.insert(conn.name.clone(), source);
-                // AMQP sink not implemented, but would be added here
+                let sink = create_amqp_sink(amqp_config).await?;
+                sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::Mqtt(mqtt_config) => {
                 let source = create_mqtt_source(mqtt_config, "").await?;
@@ -212,7 +213,13 @@ async fn create_sink_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not a NATS sink", endpoint.connection))?;
             Ok(Arc::new(nats_sink.with_subject(subject)))
         }
-        SinkEndpointType::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
+        SinkEndpointType::Amqp(AmqpEndpoint { queue }) => {
+            let amqp_sink = conn_sink
+                .as_any()
+                .downcast_ref::<AmqpSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not an AMQP sink", endpoint.connection))?;
+            Ok(Arc::new(amqp_sink.with_routing_key(queue)))
+        }
         SinkEndpointType::Mqtt(MqttEndpoint { topic }) => {
             let mqtt_sink = conn_sink
                 .as_any()
@@ -237,6 +244,9 @@ async fn create_nats_sink(config: &NatsConfig, subject: &str) -> anyhow::Result<
 }
 async fn create_amqp_source(config: &AmqpConfig, queue: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     Ok(Arc::new(AmqpSource::new(config, queue).await?))
+}
+async fn create_amqp_sink(config: &AmqpConfig) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(AmqpSink::new(config).await?))
 }
 async fn create_mqtt_source(config: &MqttConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     Ok(Arc::new(MqttSource::new(config, topic).await?))
