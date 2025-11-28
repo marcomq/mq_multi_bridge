@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxedMessageStream, BoxFuture, MessageSource};
@@ -16,11 +15,11 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub async fn new(config: &Config) -> Result<Self, async_nats::ConnectError> {
-        let client = async_nats::connect(&config.nats_url).await?;
+    pub async fn new(url: &str, subject: &str) -> Result<Self, async_nats::ConnectError> {
+        let client = async_nats::connect(url).await?;
         Ok(Self {
             client,
-            subject: config.nats_out_subject.clone(),
+            subject: subject.to_string(),
         })
     }
 }
@@ -40,8 +39,8 @@ pub struct NatsSource {
 }
 
 impl NatsSource {
-    pub async fn new(config: &Config) -> anyhow::Result<Self> {
-        let client = async_nats::connect(&config.nats_url).await?;
+    pub async fn new(url: &str, subject: &str) -> anyhow::Result<Self> {
+        let client = async_nats::connect(url).await?;
         let jetstream = jetstream::new(client);
 
         // This assumes a stream is already created that binds the subject.
@@ -56,7 +55,7 @@ impl NatsSource {
 
         let subscription = consumer.messages().await?;
 
-        info!(subject = %config.nats_in_subject, "NATS source subscribed");
+        info!(subject = %subject, "NATS source subscribed");
 
         Ok(Self {
             subscription: Arc::new(Mutex::new(subscription)),

@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxedMessageStream, BoxFuture, MessageSource};
@@ -21,14 +20,14 @@ pub struct KafkaSink {
 }
 
 impl KafkaSink {
-    pub fn new(config: &Config) -> Result<Self, rdkafka::error::KafkaError> {
+    pub fn new(brokers: &str, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &config.kafka_brokers)
+            .set("bootstrap.servers", brokers)
             .set("message.timeout.ms", "5000")
             .create()?;
         Ok(Self {
             producer,
-            topic: config.kafka_out_topic.clone(),
+            topic: topic.to_string(),
         })
     }
 }
@@ -52,17 +51,17 @@ pub struct KafkaSource {
 }
 
 impl KafkaSource {
-    pub fn new(config: &Config) -> Result<Self, rdkafka::error::KafkaError> {
+    pub fn new(brokers: &str, group_id: &str, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
         let consumer: StreamConsumer = ClientConfig::new()
-            .set("group.id", &config.kafka_group_id)
-            .set("bootstrap.servers", &config.kafka_brokers)
+            .set("group.id", group_id)
+            .set("bootstrap.servers", brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
             .create()?;
 
-        consumer.subscribe(&[&config.kafka_in_topic])?;
+        consumer.subscribe(&[topic])?;
 
-        info!(topic = %config.kafka_in_topic, "Kafka source subscribed");
+        info!(topic = %topic, "Kafka source subscribed");
 
         Ok(Self {
             consumer: Arc::new(Mutex::new(consumer)),

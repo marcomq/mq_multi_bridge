@@ -1,20 +1,57 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct KafkaConfig {
+    pub brokers: String,
+    pub group_id: String,
+}
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Config {
-    pub log_level: String,
-    pub kafka_brokers: String,
-    pub kafka_group_id: String,
-    pub kafka_in_topic: String,
-    pub kafka_out_topic: String,
-    pub kafka_dlq_topic: String,
-    pub nats_url: String,
-    pub nats_in_subject: String,
-    pub nats_out_subject: String,
-    pub amqp_url: String,
-    pub amqp_in_queue: String,
-    pub sled_path: String,
-    pub dedup_ttl_seconds: u64,
+pub struct NatsConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AmqpConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct KafkaEndpoint {
+    pub topic: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct NatsEndpoint {
+    pub subject: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct AmqpEndpoint {
+    pub queue: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceEndpoint {
+    Kafka(KafkaEndpoint),
+    Nats(NatsEndpoint),
+    Amqp(AmqpEndpoint),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkEndpoint {
+    Kafka(KafkaEndpoint),
+    Nats(NatsEndpoint),
+    Amqp(AmqpEndpoint), // Assuming AMQP sink publishes to a queue for simplicity
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Route {
+    pub name: String,
+    pub source: SourceEndpoint,
+    pub sink: SinkEndpoint,
 }
 
 pub fn load_config() -> Result<Config, config::ConfigError> {
@@ -23,24 +60,41 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
 
     let settings = config::Config::builder()
         .add_source(
+            // You can add a config file here, e.g., config::File::with_name("config.yaml")
+            config::File::with_name("config").required(false),
+        )
+        .add_source(
             config::Environment::default()
-                .separator("_")
+                .prefix("MQ_MULTI_BRIDGE")
+                .separator("__")
                 .try_parsing(true),
         )
         .set_default("log_level", "info")?
-        .set_default("kafka_brokers", "localhost:9092")?
-        .set_default("kafka_group_id", "mq-bridge-group")?
-        .set_default("kafka_in_topic", "events-in")?
-        .set_default("kafka_out_topic", "events-out")?
-        .set_default("kafka_dlq_topic", "events-dlq")?
-        .set_default("nats_url", "nats://localhost:4222")?
-        .set_default("nats_in_subject", "events.in")?
-        .set_default("nats_out_subject", "events.out")?
-        .set_default("amqp_url", "amqp://guest:guest@localhost:5672")?
-        .set_default("amqp_in_queue", "events-in-amqp")?
+        .set_default("kafka.brokers", "localhost:9092")?
+        .set_default("kafka.group_id", "mq-bridge-group")?
+        .set_default("nats.url", "nats://localhost:4222")?
+        .set_default("amqp.url", "amqp://guest:guest@localhost:5672")?
         .set_default("sled_path", "/tmp/dedup_db")?
         .set_default("dedup_ttl_seconds", 86400)?
+        .set_default("dlq.kafka.topic", "events-dlq")?
         .build()?;
 
     settings.try_deserialize()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Config {
+    pub log_level: String,
+    pub sled_path: String,
+    pub dedup_ttl_seconds: u64,
+    pub kafka: KafkaConfig,
+    pub nats: NatsConfig,
+    pub amqp: AmqpConfig,
+    pub dlq: DlqConfig,
+    pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DlqConfig {
+    pub kafka: KafkaEndpoint,
 }

@@ -11,10 +11,10 @@ pub mod sources;
 pub mod kafka;
 pub mod nats;
 pub mod amqp;
-
+use std::collections::HashMap;
 
 use crate::amqp::AmqpSource;
-use crate::kafka::KafkaSource;
+use crate::config::{AmqpEndpoint, KafkaEndpoint, NatsEndpoint, SinkEndpoint, SourceEndpoint};
 use crate::nats::NatsSource;
 use crate::config::Config;
 use crate::kafka::KafkaSink;
@@ -33,61 +33,83 @@ use tracing::{error, info, instrument, warn};
 pub async fn run(config: Config, shutdown_rx: tokio::sync::watch::Receiver<()>) -> anyhow::Result<()> {
     info!(config = ?config, "Initializing Bridge Library");
 
-    // --- Initialize Components from the library ---
+    // --- Initialize Shared Components ---
     let dedup_store = Arc::new(DeduplicationStore::new(
         &config.sled_path,
         config.dedup_ttl_seconds,
     )?);
 
-    // --- Create shared Sinks and Sources ---
-    let kafka_source = Arc::new(KafkaSource::new(&config)?);
-    let nats_source = Arc::new(NatsSource::new(&config).await?);
-    let amqp_source = Arc::new(AmqpSource::new(&config).await?);
-    
-    let nats_sink = Arc::new(NatsSink::new(&config).await?);
-    let kafka_sink = Arc::new(KafkaSink::new(&config)?);
-    
-    let dlq_sink: Arc<dyn MessageSink + Send + Sync> = kafka_sink.clone(); // Re-use Kafka sink for DLQ
+    // --- Create a single DLQ sink ---
+    let dlq_sink: Arc<dyn MessageSink + Send + Sync> = Arc::new(KafkaSink::new(
+        &config.kafka.brokers,
+        &config.dlq.kafka.topic,
+    )?);
 
-    // --- Start Bridge Tasks ---
-    let kafka_to_nats_task = run_bridge_instance(
-        "kafka_to_nats".to_string(),
-        kafka_source,
-        nats_sink.clone(),
-        dedup_store.clone(),
-        dlq_sink.clone(),
-        shutdown_rx.clone(),
-    );
+    // --- Create Sources and Sinks based on config ---
+    // We use HashMaps to avoid creating duplicate connections for the same broker.
+    let mut sources: HashMap<String, Arc<dyn MessageSource + Send + Sync>> = HashMap::new();
+    let mut sinks: HashMap<String, Arc<dyn MessageSink + Send + Sync>> = HashMap::new();
+    let mut bridge_tasks = Vec::new();
 
-    let nats_to_kafka_task = run_bridge_instance(
-        "nats_to_kafka".to_string(),
-        nats_source,
-        kafka_sink.clone(),
-        dedup_store.clone(),
-        dlq_sink.clone(),
-        shutdown_rx.clone(),
-    );
+    for route in &config.routes {
+        let source_key = serde_json::to_string(&route.source)?;
+        let source = match sources.get(&source_key) {
+            Some(s) => s.clone(),
+            None => {
+                let new_source = create_source(&config, &route.source).await?;
+                sources.insert(source_key, new_source.clone());
+                new_source
+            }
+        };
 
-    let amqp_to_nats_task = run_bridge_instance(
-        "amqp_to_nats".to_string(),
-        amqp_source,
-        nats_sink.clone(),
-        dedup_store.clone(),
-        dlq_sink.clone(),
-        shutdown_rx.clone(),
-    );
+        let sink_key = serde_json::to_string(&route.sink)?;
+        let sink = match sinks.get(&sink_key) {
+            Some(s) => s.clone(),
+            None => {
+                let new_sink = create_sink(&config, &route.sink).await?;
+                sinks.insert(sink_key, new_sink.clone());
+                new_sink
+            }
+        };
+
+        let bridge_task = run_bridge_instance(
+            route.name.clone(),
+            source,
+            sink,
+            dedup_store.clone(),
+            dlq_sink.clone(),
+            shutdown_rx.clone(),
+        );
+        bridge_tasks.push(tokio::spawn(bridge_task));
+    }
 
     info!("Starting all bridge tasks...");
 
     // Run all bridge tasks concurrently.
     // The `run` function will return if any of the tasks fail.
-    tokio::try_join!(
-        tokio::spawn(amqp_to_nats_task),
-        tokio::spawn(kafka_to_nats_task),
-        tokio::spawn(nats_to_kafka_task)
-    )?;
+    for task in bridge_tasks {
+        task.await?; // This will propagate panics from tasks.
+    }
 
     Ok(())
+}
+
+async fn create_source(config: &Config, endpoint: &SourceEndpoint) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    match endpoint {
+        SourceEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(crate::kafka::KafkaSource::new(&config.kafka.brokers, &config.kafka.group_id, topic)?)),
+        SourceEndpoint::Nats(NatsEndpoint { subject }) => Ok(Arc::new(NatsSource::new(&config.nats.url, subject).await?)),
+        SourceEndpoint::Amqp(AmqpEndpoint { queue }) => Ok(Arc::new(AmqpSource::new(&config.amqp.url, queue).await?)),
+    }
+}
+
+async fn create_sink(config: &Config, endpoint: &SinkEndpoint) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    match endpoint {
+        SinkEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(KafkaSink::new(&config.kafka.brokers, topic)?)),
+        SinkEndpoint::Nats(NatsEndpoint { subject }) => Ok(Arc::new(NatsSink::new(&config.nats.url, subject).await?)),
+        // Note: AMQP sink implementation is assumed to exist and be similar.
+        // If it doesn't exist, this would need to be created.
+        SinkEndpoint::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
+    }
 }
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]

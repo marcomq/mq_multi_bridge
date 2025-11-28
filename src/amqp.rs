@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::model::CanonicalMessage;
 use crate::sources::{BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
@@ -19,16 +18,15 @@ pub struct AmqpSource {
 }
 
 impl AmqpSource {
-    pub async fn new(config: &Config) -> anyhow::Result<Self> {
-        info!(url = %config.amqp_url, "Connecting to AMQP broker");
-        let conn = Connection::connect(&config.amqp_url, ConnectionProperties::default()).await?;
+    pub async fn new(url: &str, queue: &str) -> anyhow::Result<Self> {
+        info!(url = %url, "Connecting to AMQP broker");
+        let conn = Connection::connect(url, ConnectionProperties::default()).await?;
         let channel = conn.create_channel().await?;
 
-        let queue_name = &config.amqp_in_queue;
-        info!(queue = %queue_name, "Declaring AMQP queue");
+        info!(queue = %queue, "Declaring AMQP queue");
         channel
             .queue_declare(
-                queue_name,
+                queue,
                 QueueDeclareOptions::default(),
                 FieldTable::default(),
             )
@@ -36,7 +34,7 @@ impl AmqpSource {
 
         let consumer = channel
             .basic_consume(
-                queue_name,
+                queue,
                 "mq_multi_bridge_amqp_consumer",
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
