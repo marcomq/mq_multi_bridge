@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = "0.0.0.0:9090".parse()?;
     builder.with_http_listener(addr).install()?;
     info!("Prometheus exporter listening on {}", addr);
-    
+
     // --- 3. Create Shutdown Signal Channel ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 

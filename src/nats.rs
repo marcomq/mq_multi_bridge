@@ -1,6 +1,6 @@
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxedMessageStream, BoxFuture, MessageSource};
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_nats::{jetstream, Client};
 use async_trait::async_trait;
@@ -28,7 +28,9 @@ impl NatsSink {
 impl MessageSink for NatsSink {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
         let payload = serde_json::to_vec(&message)?;
-        self.client.publish(self.subject.clone(), payload.into()).await?;
+        self.client
+            .publish(self.subject.clone(), payload.into())
+            .await?;
         self.client.flush().await?; // Ensures the message is sent
         Ok(())
     }
@@ -72,10 +74,16 @@ impl MessageSource for NatsSource {
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
 
-        let canonical_message: CanonicalMessage = serde_json::from_slice(&message.payload).map_err(anyhow::Error::from)?;
+        let canonical_message: CanonicalMessage =
+            serde_json::from_slice(&message.payload).map_err(anyhow::Error::from)?;
 
         let commit = Box::new(move || {
-            Box::pin(async move { message.ack().await.unwrap_or_else(|e| tracing::error!("Failed to ACK NATS message: {:?}", e)) }) as BoxFuture<'static, ()>
+            Box::pin(async move {
+                message
+                    .ack()
+                    .await
+                    .unwrap_or_else(|e| tracing::error!("Failed to ACK NATS message: {:?}", e))
+            }) as BoxFuture<'static, ()>
         });
 
         Ok((canonical_message, commit))

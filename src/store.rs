@@ -26,7 +26,7 @@ impl DeduplicationStore {
             .unwrap()
             .as_secs();
 
-        let optional_value = self.db.get(&key)?;
+        let optional_value = self.db.get(key)?;
 
         if let Some(value) = optional_value {
             // Value is the timestamp of insertion
@@ -36,7 +36,7 @@ impl DeduplicationStore {
             // Check if TTL has expired
             if now > insertion_ts + self.ttl_seconds {
                 // TTL expired, treat as not a duplicate and update timestamp
-                self.db.insert(&key, &now.to_be_bytes())?;
+                self.db.insert(key, &now.to_be_bytes())?;
                 return Ok(false);
             }
             // Within TTL, it's a duplicate
@@ -44,7 +44,7 @@ impl DeduplicationStore {
         }
 
         // Not seen before, insert it and return false (not a duplicate)
-        self.db.insert(&key, &now.to_be_bytes())?;
+        self.db.insert(key, &now.to_be_bytes())?;
         Ok(false)
     }
 }

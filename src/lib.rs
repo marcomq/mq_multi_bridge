@@ -3,34 +3,37 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
-pub mod config;
-pub mod model;
-pub mod sinks;
-pub mod store;
-pub mod sources;
-pub mod kafka;
-pub mod nats;
 pub mod amqp;
+pub mod config;
+pub mod kafka;
+pub mod model;
+pub mod nats;
+pub mod sinks;
+pub mod sources;
+pub mod store;
 use std::collections::HashMap;
 
 use crate::amqp::AmqpSource;
-use crate::config::{AmqpEndpoint, KafkaEndpoint, NatsEndpoint, SinkEndpoint, SourceEndpoint};
-use crate::nats::NatsSource;
 use crate::config::Config;
+use crate::config::{AmqpEndpoint, KafkaEndpoint, NatsEndpoint, SinkEndpoint, SourceEndpoint};
 use crate::kafka::KafkaSink;
 use crate::nats::NatsSink;
+use crate::nats::NatsSource;
 use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
 use std::sync::Arc;
-use std::time::{Duration};
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
 
 /// The main entry point for running the bridge logic.
 /// This function can be called from `main.rs` or from integration tests.
 #[instrument(skip_all)]
-pub async fn run(config: Config, shutdown_rx: tokio::sync::watch::Receiver<()>) -> anyhow::Result<()> {
+pub async fn run(
+    config: Config,
+    shutdown_rx: tokio::sync::watch::Receiver<()>,
+) -> anyhow::Result<()> {
     info!(config = ?config, "Initializing Bridge Library");
 
     // --- Initialize Shared Components ---
@@ -94,18 +97,34 @@ pub async fn run(config: Config, shutdown_rx: tokio::sync::watch::Receiver<()>) 
     Ok(())
 }
 
-async fn create_source(config: &Config, endpoint: &SourceEndpoint) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+async fn create_source(
+    config: &Config,
+    endpoint: &SourceEndpoint,
+) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     match endpoint {
-        SourceEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(crate::kafka::KafkaSource::new(&config.kafka.brokers, &config.kafka.group_id, topic)?)),
-        SourceEndpoint::Nats(NatsEndpoint { subject }) => Ok(Arc::new(NatsSource::new(&config.nats.url, subject).await?)),
-        SourceEndpoint::Amqp(AmqpEndpoint { queue }) => Ok(Arc::new(AmqpSource::new(&config.amqp.url, queue).await?)),
+        SourceEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(
+            crate::kafka::KafkaSource::new(&config.kafka.brokers, &config.kafka.group_id, topic)?,
+        )),
+        SourceEndpoint::Nats(NatsEndpoint { subject }) => {
+            Ok(Arc::new(NatsSource::new(&config.nats.url, subject).await?))
+        }
+        SourceEndpoint::Amqp(AmqpEndpoint { queue }) => {
+            Ok(Arc::new(AmqpSource::new(&config.amqp.url, queue).await?))
+        }
     }
 }
 
-async fn create_sink(config: &Config, endpoint: &SinkEndpoint) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+async fn create_sink(
+    config: &Config,
+    endpoint: &SinkEndpoint,
+) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     match endpoint {
-        SinkEndpoint::Kafka(KafkaEndpoint { topic }) => Ok(Arc::new(KafkaSink::new(&config.kafka.brokers, topic)?)),
-        SinkEndpoint::Nats(NatsEndpoint { subject }) => Ok(Arc::new(NatsSink::new(&config.nats.url, subject).await?)),
+        SinkEndpoint::Kafka(KafkaEndpoint { topic }) => {
+            Ok(Arc::new(KafkaSink::new(&config.kafka.brokers, topic)?))
+        }
+        SinkEndpoint::Nats(NatsEndpoint { subject }) => {
+            Ok(Arc::new(NatsSink::new(&config.nats.url, subject).await?))
+        }
         // Note: AMQP sink implementation is assumed to exist and be similar.
         // If it doesn't exist, this would need to be created.
         SinkEndpoint::Amqp(_endpoint) => unimplemented!("AMQP Sink is not implemented yet"),
@@ -129,21 +148,21 @@ async fn run_bridge_instance(
                 info!("Shutdown signal received, stopping message consumption.");
                 break;
             }
-            
+
             result = source.receive() => {
                 match result {
                     Ok((message, commit)) => {
                         let msg_id = message.message_id;
                         info!(message_id = %msg_id, "Received message");
                         // TODO: metrics::increment_counter!("bridge_messages_received", "bridge" => bridge_id.clone());
-        
+
                         if dedup_store.is_duplicate(&msg_id).unwrap_or(false) {
                             warn!(message_id = %msg_id, "Duplicate message detected, skipping.");
                             // TODO: metrics::increment_counter!("bridge_messages_duplicate", "bridge" => bridge_id.clone());
                             commit().await; // Commit even if duplicate to remove from source queue
                             continue;
                         }
-        
+
                         let mut attempts = 0;
                         let max_attempts = 5;
                         loop {

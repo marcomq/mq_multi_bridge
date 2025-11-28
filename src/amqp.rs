@@ -1,8 +1,8 @@
 use crate::model::CanonicalMessage;
 use crate::sources::{BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
-use futures::future::BoxFuture;
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, QueueDeclareOptions},
@@ -25,11 +25,7 @@ impl AmqpSource {
 
         info!(queue = %queue, "Declaring AMQP queue");
         channel
-            .queue_declare(
-                queue,
-                QueueDeclareOptions::default(),
-                FieldTable::default(),
-            )
+            .queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default())
             .await?;
 
         let consumer = channel
@@ -56,13 +52,18 @@ impl MessageSource for AmqpSource {
             .await
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
 
-        let payload: serde_json::Value = serde_json::from_slice(&delivery.data).map_err(anyhow::Error::from)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&delivery.data).map_err(anyhow::Error::from)?;
         let message = CanonicalMessage::new(payload);
 
         let commit = Box::new(move || {
             let delivery_tag = delivery.delivery_tag;
-            Box::pin(async move { // This async block becomes the future
-                delivery.ack(BasicAckOptions::default()).await.expect("Failed to ack AMQP message");
+            Box::pin(async move {
+                // This async block becomes the future
+                delivery
+                    .ack(BasicAckOptions::default())
+                    .await
+                    .expect("Failed to ack AMQP message");
                 info!(delivery_tag, "AMQP message acknowledged");
             }) as BoxFuture<'static, ()> // Explicitly cast to a trait object
         });
