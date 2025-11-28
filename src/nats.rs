@@ -141,7 +141,7 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     if let Some(ca_file) = &config.tls.ca_file {
         let mut pem = BufReader::new(std::fs::File::open(ca_file)?);
         for cert in rustls_pemfile::certs(&mut pem) {
-            root_store.add(cert?.into())?;
+            root_store.add(cert?)?;
         }
     }
 
@@ -149,7 +149,7 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     if let Some(cert_file) = &config.tls.cert_file {
         let mut pem = BufReader::new(std::fs::File::open(cert_file)?);
         for cert in rustls_pemfile::certs(&mut pem) {
-            client_auth_certs.push(cert?.into());
+            client_auth_certs.push(cert?);
         }
     }
 
@@ -158,7 +158,7 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
         let key_bytes = tokio::fs::read(key_file).await?;
         let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice()).collect::<Result<_,_>>()?;
         if !keys.is_empty() {
-            client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0).into()));
+            client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0)));
         }
     }
 
