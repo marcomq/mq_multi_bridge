@@ -1,13 +1,13 @@
 use crate::model::CanonicalMessage;
-use crate::sources::{BoxedMessageStream, MessageSource};
+use crate::config::AmqpConfig;
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
-    options::{BasicAckOptions, BasicConsumeOptions, QueueDeclareOptions},
-    types::FieldTable,
-    Connection, ConnectionProperties, Consumer,
+    options::{BasicAckOptions, BasicConsumeOptions, BasicQosOptions, QueueDeclareOptions},
+    types::FieldTable, Connection, ConnectionProperties, Consumer,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -19,15 +19,25 @@ pub struct AmqpSource {
 
 use std::any::Any;
 impl AmqpSource {
-    pub async fn new(url: &str, queue: &str) -> anyhow::Result<Self> {
-        info!(url = %url, "Connecting to AMQP broker");
-        let conn = Connection::connect(url, ConnectionProperties::default()).await?;
+    pub async fn new(config: &AmqpConfig, queue: &str) -> anyhow::Result<Self> {
+        info!(url = %config.url, "Connecting to AMQP broker");
+        
+        let conn_props = ConnectionProperties::default();
+        let conn = if config.tls.required {
+            let tls_config = build_tls_config(config).await?;
+            Connection::connect_with_config(&config.url, conn_props, tls_config).await?
+        } else {
+            Connection::connect(&config.url, conn_props).await?
+        };
         let channel = conn.create_channel().await?;
 
         info!(queue = %queue, "Declaring AMQP queue");
         channel
             .queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default())
             .await?;
+
+        // Set prefetch count to 1 to ensure we only process one message at a time
+        channel.basic_qos(1, BasicQosOptions::default()).await?;
 
         let consumer = channel
             .basic_consume(
@@ -50,6 +60,23 @@ impl AmqpSource {
     }
 }
 
+async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {
+    let cert_chain = config.tls.ca_file.clone();
+
+    let identity = if let Some(pkcs12_file) = &config.tls.cert_file {
+        let der = tokio::fs::read(pkcs12_file).await?;
+        let password = config.tls.cert_password.clone().unwrap_or_default();
+        Some(OwnedIdentity { der, password })
+    } else {
+        None
+    };
+
+    Ok(OwnedTLSConfig {
+        identity,
+        cert_chain,
+    })
+}
+
 #[async_trait]
 impl MessageSource for AmqpSource {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
@@ -64,15 +91,13 @@ impl MessageSource for AmqpSource {
         let message = CanonicalMessage::new(payload);
 
         let commit = Box::new(move || {
-            let delivery_tag = delivery.delivery_tag;
             Box::pin(async move {
-                // This async block becomes the future
                 delivery
                     .ack(BasicAckOptions::default())
                     .await
                     .expect("Failed to ack AMQP message");
-                info!(delivery_tag, "AMQP message acknowledged");
-            }) as BoxFuture<'static, ()> // Explicitly cast to a trait object
+                info!(delivery_tag = delivery.delivery_tag, "AMQP message acknowledged");
+            }) as BoxFuture<'static, ()>
         });
 
         Ok((message, commit))

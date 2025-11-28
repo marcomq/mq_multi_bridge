@@ -1,4 +1,5 @@
 use crate::model::CanonicalMessage;
+use crate::config::KafkaConfig;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
@@ -20,11 +21,26 @@ pub struct KafkaSink {
 }
 
 impl KafkaSink {
-    pub fn new(brokers: &str, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
-        let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", brokers)
-            .set("message.timeout.ms", "5000")
-            .create()?;
+    pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+        let mut client_config = ClientConfig::new();
+        client_config
+            .set("bootstrap.servers", &config.brokers)
+            .set("message.timeout.ms", "5000");
+
+        if config.tls.required {
+            client_config.set("security.protocol", "ssl");
+            if let Some(ca_file) = &config.tls.ca_file {
+                client_config.set("ssl.ca.location", ca_file);
+            }
+            if let Some(cert_file) = &config.tls.cert_file {
+                client_config.set("ssl.certificate.location", cert_file);
+            }
+            if let Some(key_file) = &config.tls.key_file {
+                client_config.set("ssl.key.location", key_file);
+            }
+            client_config.set("enable.ssl.certificate.verification", (!config.tls.accept_invalid_certs).to_string());
+        }
+        let producer: FutureProducer = client_config.create()?;
         Ok(Self {
             producer,
             topic: topic.to_string(),
@@ -64,17 +80,29 @@ pub struct KafkaSource {
 use std::any::Any;
 
 impl KafkaSource {
-    pub fn new(
-        brokers: &str,
-        group_id: &str,
-        topic: &str,
-    ) -> Result<Self, rdkafka::error::KafkaError> {
-        let consumer: StreamConsumer = ClientConfig::new()
-            .set("group.id", group_id)
-            .set("bootstrap.servers", brokers)
+    pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+        let mut client_config = ClientConfig::new();
+        client_config
+            .set("group.id", &config.group_id)
+            .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
-            .set("auto.offset.reset", "earliest")
-            .create()?;
+            .set("auto.offset.reset", "earliest");
+
+        if config.tls.required {
+            client_config.set("security.protocol", "ssl");
+            if let Some(ca_file) = &config.tls.ca_file {
+                client_config.set("ssl.ca.location", ca_file);
+            }
+            if let Some(cert_file) = &config.tls.cert_file {
+                client_config.set("ssl.certificate.location", cert_file);
+            }
+            if let Some(key_file) = &config.tls.key_file {
+                client_config.set("ssl.key.location", key_file);
+            }
+            client_config.set("enable.ssl.certificate.verification", (!config.tls.accept_invalid_certs).to_string());
+        }
+
+        let consumer: StreamConsumer = client_config.create()?;
 
         consumer.subscribe(&[topic])?;
 

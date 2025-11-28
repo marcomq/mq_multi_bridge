@@ -1,9 +1,19 @@
 use crate::model::CanonicalMessage;
+use crate::config::NatsConfig;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
-use async_nats::{jetstream, Client};
+use async_nats::{jetstream, Client, ConnectOptions};
 use async_trait::async_trait;
+use rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use rustls::crypto::ring as rustls_ring;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
+};
+use std::io::BufReader;
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,8 +25,10 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub async fn new(url: &str, subject: &str) -> Result<Self, async_nats::ConnectError> {
-        let client = async_nats::connect(url).await?;
+    pub async fn new(config: &NatsConfig, subject: &str) -> anyhow::Result<Self> {
+        let options = build_nats_options(config).await?;
+        let client = options.connect(&config.url).await?;
+
         Ok(Self {
             client,
             subject: subject.to_string(),
@@ -53,8 +65,9 @@ pub struct NatsSource {
 use std::any::Any;
 
 impl NatsSource {
-    pub async fn new(url: &str, subject: &str) -> anyhow::Result<Self> {
-        let client = async_nats::connect(url).await?;
+    pub async fn new(config: &NatsConfig, subject: &str) -> anyhow::Result<Self> {
+        let options = build_nats_options(config).await?;
+        let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
         // This assumes a stream is already created that binds the subject.
@@ -117,4 +130,90 @@ impl Clone for NatsSource {
     fn clone(&self) -> Self {
         Self { subscription: self.subscription.clone() }
     }
+}
+
+async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOptions> {
+    if !config.tls.required {
+        return Ok(ConnectOptions::new());
+    }
+
+    let mut root_store = rustls::RootCertStore::empty();
+    if let Some(ca_file) = &config.tls.ca_file {
+        let mut pem = BufReader::new(std::fs::File::open(ca_file)?);
+        let certs = rustls_pemfile::certs(&mut pem)?;
+        root_store.add_parsable_certificates(certs.into_iter().map(CertificateDer::from));
+    }
+
+    let mut client_auth_certs = Vec::new();
+    if let Some(cert_file) = &config.tls.cert_file {
+        let mut pem = BufReader::new(std::fs::File::open(cert_file)?);
+        client_auth_certs = rustls_pemfile::certs(&mut pem)?.into_iter().map(CertificateDer::from).collect();
+    }
+
+    let mut client_auth_key = None;
+    if let Some(key_file) = &config.tls.key_file {
+        let key_bytes = tokio::fs::read(key_file).await?;
+        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())?;
+        if !keys.is_empty() {
+            client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0).into()));
+        }
+    }
+
+    let provider = rustls_ring::default_provider();
+
+    let mut tls_config = ClientConfig::builder_with_provider(provider.clone().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(root_store)
+        .with_client_auth_cert(client_auth_certs, client_auth_key.unwrap())?;
+
+    if config.tls.accept_invalid_certs {
+        #[derive(Debug)]
+        struct NoopServerCertVerifier {
+            supported_schemes: Vec<SignatureScheme>,
+        }
+        impl ServerCertVerifier for NoopServerCertVerifier {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &rustls::pki_types::ServerName,
+                _ocsp_response: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, RustlsError> {
+                Ok(ServerCertVerified::assertion())
+            }
+
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, RustlsError> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, RustlsError> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                self.supported_schemes.clone()
+            }
+        }
+        let schemes = provider
+            .signature_verification_algorithms
+            .supported_schemes();
+        let verifier = NoopServerCertVerifier {
+            supported_schemes: schemes,
+        };
+        tls_config.dangerous().set_certificate_verifier(Arc::new(verifier));
+    }
+
+    Ok(ConnectOptions::new().tls_client_config(tls_config))
 }

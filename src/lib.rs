@@ -187,19 +187,19 @@ async fn create_sink_from_route(
 }
 
 async fn create_kafka_source(config: &KafkaConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(crate::kafka::KafkaSource::new(&config.brokers, &config.group_id, topic)?))
+    Ok(Arc::new(crate::kafka::KafkaSource::new(config, topic)?))
 }
 async fn create_kafka_sink(config: &KafkaConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(KafkaSink::new(&config.brokers, topic)?))
+    Ok(Arc::new(KafkaSink::new(config, topic)?))
 }
 async fn create_nats_source(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(NatsSource::new(&config.url, subject).await?))
+    Ok(Arc::new(NatsSource::new(config, subject).await?))
 }
 async fn create_nats_sink(config: &NatsConfig, subject: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(NatsSink::new(&config.url, subject).await?))
+    Ok(Arc::new(NatsSink::new(config, subject).await?))
 }
 async fn create_amqp_source(config: &AmqpConfig, queue: &str) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(AmqpSource::new(&config.url, queue).await?))
+    Ok(Arc::new(AmqpSource::new(config, queue).await?))
 }
 
 
@@ -293,12 +293,14 @@ mod tests {
                     name: "conn1".to_string(),
                     connection_type: ConnectionType::Nats(NatsConfig {
                         url: "nats://localhost:4222".to_string(),
+                        ..Default::default()
                     }),
                 },
                 Connection {
                     name: "conn1".to_string(),
                     connection_type: ConnectionType::Nats(NatsConfig {
                         url: "nats://localhost:4223".to_string(),
+                        ..Default::default()
                     }),
                 },
             ],

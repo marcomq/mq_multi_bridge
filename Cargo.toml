@@ -28,7 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 rdkafka = { version = "0.36", features = ["tokio"] }
 futures = "0.3"
 async-trait = "0.1"
-lapin = "2.3.1"
+lapin = { version = "2.4.0", features = ["rustls"] }
+rustls-pemfile = "1.0"
+tokio-rustls = "0.25"
+rustls = { version = "0.22", features = ["ring"] }
 async-nats = "0.34"
 
 # Data & Serialization

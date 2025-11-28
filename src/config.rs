@@ -1,19 +1,48 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct KafkaConfig {
     pub brokers: String,
     pub group_id: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TlsConfig {
+    #[serde(default)]
+    pub required: bool,
+    pub ca_file: Option<String>,
+    pub cert_file: Option<String>,
+    pub key_file: Option<String>,
+    pub cert_password: Option<String>,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct NatsConfig {
     pub url: String,
+    #[serde(default)]
+    pub tls: NatsTlsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct NatsTlsConfig {
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    pub ca_file: Option<String>,
+    pub cert_file: Option<String>,
+    pub key_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct AmqpConfig {
     pub url: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
