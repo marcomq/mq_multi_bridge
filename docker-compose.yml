@@ -9,7 +9,8 @@ services:
     environment:
       # The application can read its configuration from the mounted config file.
       # You might still need some environment variables, e.g., for logging.
-      - RUST_LOG=info,mq_multi_bridge=debug
+      - BRIDGE_LOGGGER=json
+      - BRIDGE_LOG_LEVEL=info,mq_multi_bridge=debug
     volumes:
       - ./sled_data:/data # Persist deduplication database
       - ./config/config.yml:/etc/mq-bridge/config.yml:ro # Mount the configuration file into the container

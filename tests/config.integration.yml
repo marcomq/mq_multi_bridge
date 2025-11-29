@@ -1,4 +1,5 @@
 log_level: "info"
+logger: "plain"
 sled_path: "/tmp/integration_test_db"
 dedup_ttl_seconds: 60
 

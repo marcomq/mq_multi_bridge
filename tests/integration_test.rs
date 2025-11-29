@@ -103,13 +103,25 @@ async fn test_end_to_end_routing() {
         .add_source(ConfigFile::with_name("tests/config.integration").required(true))
         .set_override("connections.0.file.path", input_path.to_str().unwrap())
         .unwrap()
-        .set_override("connections.1.file.path", output_kafka_path.to_str().unwrap())
+        .set_override(
+            "connections.1.file.path",
+            output_kafka_path.to_str().unwrap(),
+        )
         .unwrap()
-        .set_override("connections.2.file.path", output_nats_path.to_str().unwrap())
+        .set_override(
+            "connections.2.file.path",
+            output_nats_path.to_str().unwrap(),
+        )
         .unwrap()
-        .set_override("connections.3.file.path", output_amqp_path.to_str().unwrap())
+        .set_override(
+            "connections.3.file.path",
+            output_amqp_path.to_str().unwrap(),
+        )
         .unwrap()
-        .set_override("connections.4.file.path", output_mqtt_path.to_str().unwrap())
+        .set_override(
+            "connections.4.file.path",
+            output_mqtt_path.to_str().unwrap(),
+        )
         .unwrap()
         .build()
         .unwrap();

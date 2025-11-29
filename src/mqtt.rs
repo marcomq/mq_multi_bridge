@@ -1,18 +1,16 @@
 use crate::config::MqttConfig;
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use rumqttc::{
-    tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport,
-};
+use fastrand;
+use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use fastrand;
 pub struct MqttSink {
     client: AsyncClient,
     topic: String,
@@ -58,8 +56,10 @@ pub struct MqttSource {
 impl MqttSource {
     pub async fn new(config: &MqttConfig, topic: &str) -> anyhow::Result<Self> {
         let (client, eventloop) = create_client_and_eventloop(config).await?;
-        client.subscribe(topic, QoS::AtLeastOnce).await?;
-        info!(topic = %topic, "MQTT source subscribed");
+        if !topic.is_empty() {
+            client.subscribe(topic, QoS::AtLeastOnce).await?;
+            info!(topic = %topic, "MQTT source subscribed");
+        }
         Ok(Self {
             client,
             eventloop: Arc::new(Mutex::new(eventloop)),
@@ -92,7 +92,9 @@ impl MessageSource for MqttSource {
 
                     return Ok((canonical_message, commit));
                 }
-                Ok(Event::Incoming(Incoming::Disconnect)) => return Err(anyhow!("MQTT disconnected")),
+                Ok(Event::Incoming(Incoming::Disconnect)) => {
+                    return Err(anyhow!("MQTT disconnected"))
+                }
                 Err(e) => return Err(anyhow!("MQTT connection error: {}", e)),
                 _ => continue, // Ignore other packet types
             }
@@ -108,11 +110,8 @@ async fn create_client_and_eventloop(
     config: &MqttConfig,
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
     let (host, port) = parse_url(&config.url)?;
-    let mut mqttoptions = MqttOptions::new(
-        format!("mq_multi_bridge_{}", fastrand::u32(..)),
-        host,
-        port,
-    );
+    let mut mqttoptions =
+        MqttOptions::new(format!("mq_multi_bridge_{}", fastrand::u32(..)), host, port);
     mqttoptions.set_keep_alive(Duration::from_secs(20));
     mqttoptions.set_clean_session(true);
 
@@ -145,8 +144,17 @@ async fn create_client_and_eventloop(
 
 fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
     let url = url::Url::parse(url)?;
-    let host = url.host_str().ok_or_else(|| anyhow!("No host in URL"))?.to_string();
-    let port = url.port().unwrap_or(if url.scheme() == "mqtts" || url.scheme() == "ssl" { 8883 } else { 1883 });
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("No host in URL"))?
+        .to_string();
+    let port = url
+        .port()
+        .unwrap_or(if url.scheme() == "mqtts" || url.scheme() == "ssl" {
+            8883
+        } else {
+            1883
+        });
     Ok((host, port))
 }
 

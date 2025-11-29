@@ -180,27 +180,28 @@ All configuration parameters can be set via environment variables. This is parti
 
 ```bash
 # General settings
-export MQ_MULTI_BRIDGE_LOG_LEVEL="info"
+export BRIDGE_LOG_LEVEL="info"
+export BRIDGE_LOGGGER="json"
 
 # Metrics
-export MQ_MULTI_BRIDGE_METRICS__ENABLED=true
-export MQ_MULTI_BRIDGE_METRICS__LISTEN_ADDRESS="0.0.0.0:9090"
+export BRIDGE_METRICS__ENABLED=true
+export BRIDGE_METRICS__LISTEN_ADDRESS="0.0.0.0:9090"
 
 # Connection: kafka_us_east
-export MQ_MULTI_BRIDGE_CONNECTIONS__0__NAME="kafka_us_east"
-export MQ_MULTI_BRIDGE_CONNECTIONS__0__KAFKA__BROKERS="kafka-us.example.com:9092"
-export MQ_MULTI_BRIDGE_CONNECTIONS__0__KAFKA__GROUP_ID="bridge-group-us"
+export BRIDGE_CONNECTIONS__0__NAME="kafka_us_east"
+export BRIDGE_CONNECTIONS__0__KAFKA__BROKERS="kafka-us.example.com:9092"
+export BRIDGE_CONNECTIONS__0__KAFKA__GROUP_ID="bridge-group-us"
 
 # Connection: nats_main
-export MQ_MULTI_BRIDGE_CONNECTIONS__1__NAME="nats_main"
-export MQ_MULTI_BRIDGE_CONNECTIONS__1__NATS__URL="nats://nats.example.com:4222"
+export BRIDGE_CONNECTIONS__1__NAME="nats_main"
+export BRIDGE_CONNECTIONS__1__NATS__URL="nats://nats.example.com:4222"
 
 # Route 0: kafka_us_east -> nats_main
-export MQ_MULTI_BRIDGE_ROUTES__0__NAME="kafka_us_to_nats_events"
-export MQ_MULTI_BRIDGE_ROUTES__0__SOURCE__CONNECTION="kafka_us_east"
-export MQ_MULTI_BRIDGE_ROUTES__0__SOURCE__KAFKA__TOPIC="raw_events"
-export MQ_MULTI_BRIDGE_ROUTES__0__SINK__CONNECTION="nats_main"
-export MQ_MULTI_BRIDGE_ROUTES__0__SINK__NATS__SUBJECT="processed.events"
+export BRIDGE_ROUTES__0__NAME="kafka_us_to_nats_events"
+export BRIDGE_ROUTES__0__SOURCE__CONNECTION="kafka_us_east"
+export BRIDGE_ROUTES__0__SOURCE__KAFKA__TOPIC="raw_events"
+export BRIDGE_ROUTES__0__SINK__CONNECTION="nats_main"
+export BRIDGE_ROUTES__0__SINK__NATS__SUBJECT="processed.events"
 ```
 
 ### Using a `.env` file

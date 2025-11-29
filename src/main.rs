@@ -4,8 +4,7 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 use mq_multi_bridge::Bridge;
 // Use the library crate
-use mq_multi_bridge::config;
-use mq_multi_bridge::config::load_config;
+use mq_multi_bridge::config::{load_config, Config};
 use std::net::SocketAddr;
 use tracing::{error, info, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -14,19 +13,37 @@ use tracing_subscriber::EnvFilter;
 use anyhow::Context;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config: config::Config = load_config().context("Failed to load configuration")?;
+    let config: Config = load_config().context("Failed to load configuration")?;
+    init_logging(&config);
 
+    if config.routes.is_empty() {
+        warn!("No routes configured. Application will not bridge any messages. Exiting.");
+        return Ok(());
+    }
+
+    run_app(config).await
+}
+fn init_logging(config: &Config) {
     // --- 1. Initialize Logging ---
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("mq_multi_bridge={}", config.log_level)));
 
-    tracing_subscriber::fmt()
+    let logger = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_span_events(FmtSpan::CLOSE) // Log entry and exit of spans
-        .with_target(true)
-        .json() // Output logs in JSON format
-        .init();
+        .with_target(true);
+    dbg!(&config.logger);
+    match config.logger.as_str() {
+        "json" => {
+            logger.json().init();
+        }
+        "plain" | _ => {
+            logger.init();
+        }
+    }
+}
 
+async fn run_app(config: Config) -> anyhow::Result<()> {
     info!("Starting MQ Multi Bridge application");
 
     if config.routes.is_empty() {
@@ -55,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let mut bridge_handle = tokio::spawn(bridge.run());
 
     // --- 4. Wait for shutdown signal or task completion ---
+    // --- 4. Wait for shutdown signal (Ctrl+C or SIGTERM) or task completion ---
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received. Broadcasting to all tasks...");
@@ -62,17 +80,54 @@ async fn main() -> anyhow::Result<()> {
             shutdown_tx.send(()).context("Failed to send shutdown signal")?;
             info!("Waiting for bridge tasks to complete...");
         }
+        // Handle Ctrl+C (SIGINT)
+        Ok(()) = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C (SIGINT) received.");
+        },
+        // Handle SIGTERM (common for service shutdowns)
+        // This is a Unix-specific signal.
+        _ = async {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler").recv().await;
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-unix platforms, this future will never resolve.
+                futures::future::pending::<()>().await;
+            }
+        } => {
+            info!("SIGTERM received.");
+        },
         res = &mut bridge_handle => {
              match res {
-                Ok(Ok(_)) => warn!("Bridge task finished unexpectedly without an error."),
+                Ok(Ok(_)) => error!("Bridge task finished unexpectedly without an error."),
                 Ok(Err(e)) => error!("Bridge task finished with an error: {}", e),
                 Err(e) => error!("Bridge task panicked: {}", e),
             }
+            return Ok(()); // Exit if the bridge task finishes or panics
         }
     }
 
-    // Wait for the bridge to finish shutting down after a Ctrl+C
-    let _ = bridge_handle.await;
-    info!("Bridge has shut down gracefully.");
+    info!("Shutdown signal received. Broadcasting to all tasks...");
+    if shutdown_tx.send(()).is_err() {
+        // This can happen if the bridge task has already shut down.
+        warn!("Could not send shutdown signal, receiver was already dropped.");
+    }
+
+    info!("Waiting up to 200ms for graceful shutdown...");
+    tokio::select! {
+        res = bridge_handle => {
+            match res {
+                Ok(Ok(_)) => info!("Bridge has shut down gracefully."),
+                Ok(Err(e)) => error!("Bridge shut down with an error: {}", e),
+                Err(e) => error!("Bridge task panicked during shutdown: {}", e),
+            }
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+            warn!("Graceful shutdown timed out after 200ms. Forcing exit.");
+        }
+    }
     Ok(())
 }

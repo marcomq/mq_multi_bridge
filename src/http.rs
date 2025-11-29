@@ -42,7 +42,9 @@ impl HttpSource {
             .route("/", post(handle_request))
             .with_state(request_tx);
 
-        let listen_address = config.listen_address.as_deref()
+        let listen_address = config
+            .listen_address
+            .as_deref()
             .ok_or_else(|| anyhow!("'listen_address' is required for http source connection"))?;
         let addr: SocketAddr = listen_address
             .parse()
@@ -92,7 +94,7 @@ async fn handle_request(
     Json(payload): Json<Value>,
 ) -> Response {
     let (response_tx, response_rx) = oneshot::channel();
-    let message = CanonicalMessage::new(payload);
+    let message = CanonicalMessage::deserialized_new(payload);
 
     if tx.send((message, response_tx)).await.is_err() {
         return (

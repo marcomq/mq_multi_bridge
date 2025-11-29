@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -136,15 +138,16 @@ pub struct SinkEndpoint {
 pub fn load_config() -> Result<Config, config::ConfigError> {
     // Attempt to load .env file
     dotenvy::dotenv().ok();
+    let config_file = std::env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yml".to_string());
 
     let settings = config::Config::builder()
         .add_source(
             // You can add a config file here, e.g., config::File::with_name("config.yaml")
-            config::File::with_name("config").required(false),
+            config::File::from(Path::new(&config_file)).required(false),
         )
         .add_source(
             config::Environment::default()
-                .prefix("MQ_MULTI_BRIDGE")
+                .prefix("BRIDGE")
                 .separator("__")
                 .try_parsing(true),
         )
@@ -183,6 +186,8 @@ pub struct Route {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {
+    #[serde(default)]
+    pub logger: String,
     pub log_level: String,
     pub sled_path: String,
     pub dedup_ttl_seconds: u64,
@@ -278,7 +283,11 @@ routes:
         assert_eq!(config.routes.len(), 1);
         assert!(config.dlq.is_some());
 
-        let kafka_conn = config.connections.iter().find(|c| c.name == "kafka_main").unwrap();
+        let kafka_conn = config
+            .connections
+            .iter()
+            .find(|c| c.name == "kafka_main")
+            .unwrap();
         if let ConnectionType::Kafka(kafka_config) = &kafka_conn.connection_type {
             assert_eq!(kafka_config.brokers, "kafka:9092");
         } else {
@@ -290,4 +299,3 @@ routes:
         assert_eq!(route.source.connection, "kafka_main");
     }
 }
-

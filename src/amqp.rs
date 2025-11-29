@@ -1,7 +1,7 @@
-use crate::model::CanonicalMessage;
 use crate::config::AmqpConfig;
+use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -146,7 +146,7 @@ impl MessageSource for AmqpSource {
 
         let payload: serde_json::Value =
             serde_json::from_slice(&delivery.data).map_err(anyhow::Error::from)?;
-        let message = CanonicalMessage::new(payload);
+        let message = CanonicalMessage::deserialized_new(payload);
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -154,7 +154,10 @@ impl MessageSource for AmqpSource {
                     .ack(BasicAckOptions::default())
                     .await
                     .expect("Failed to ack AMQP message");
-                info!(delivery_tag = delivery.delivery_tag, "AMQP message acknowledged");
+                info!(
+                    delivery_tag = delivery.delivery_tag,
+                    "AMQP message acknowledged"
+                );
             }) as BoxFuture<'static, ()>
         });
 
@@ -168,6 +171,8 @@ impl MessageSource for AmqpSource {
 
 impl Clone for AmqpSource {
     fn clone(&self) -> Self {
-        Self { consumer: self.consumer.clone() }
+        Self {
+            consumer: self.consumer.clone(),
+        }
     }
 }

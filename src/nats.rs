@@ -1,20 +1,16 @@
-use crate::model::CanonicalMessage;
 use crate::config::NatsConfig;
+use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_nats::{jetstream, Client, ConnectOptions};
 use async_trait::async_trait;
-use rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-};
+use futures::StreamExt;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use rustls::{
-    ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
-};
+use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
-use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -73,9 +69,11 @@ impl NatsSource {
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
-        // Check if the stream exists, but don't create a consumer yet.
-        let _stream = jetstream.get_stream(stream_name).await?;
-        info!(stream = %stream_name, "NATS source connection established");
+        if !stream_name.is_empty() {
+            // Check if the stream exists, but don't create a consumer yet.
+            let _stream = jetstream.get_stream(stream_name).await?;
+            info!(stream = %stream_name, "NATS source connection established");
+        }
 
         Ok(Self {
             jetstream,
@@ -84,7 +82,12 @@ impl NatsSource {
         })
     }
 
-    pub async fn with_subject_and_stream(&self, subject: &str, stream_override: &Option<String>, conn_config: &NatsConfig) -> anyhow::Result<Self> {
+    pub async fn with_subject_and_stream(
+        &self,
+        subject: &str,
+        stream_override: &Option<String>,
+        conn_config: &NatsConfig,
+    ) -> anyhow::Result<Self> {
         let stream_name = stream_override
             .as_deref()
             .or(conn_config.default_stream.as_deref())
@@ -96,7 +99,11 @@ impl NatsSource {
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject
                 // to allow for multiple routes from the same stream.
-                durable_name: Some(format!("mq-bridge-{}-{}", stream_name, subject.replace('.', "-"))),
+                durable_name: Some(format!(
+                    "mq-bridge-{}-{}",
+                    stream_name,
+                    subject.replace('.', "-")
+                )),
                 filter_subject: subject.to_string(),
                 ..Default::default()
             })
@@ -179,7 +186,8 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     let mut client_auth_key = None;
     if let Some(key_file) = &config.tls.key_file {
         let key_bytes = tokio::fs::read(key_file).await?;
-        let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice()).collect::<Result<_,_>>()?;
+        let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())
+            .collect::<Result<_, _>>()?;
         if !keys.is_empty() {
             client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0)));
         }
@@ -190,7 +198,11 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     let mut tls_config = ClientConfig::builder_with_provider(Arc::new(provider.clone()))
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(root_store)
-        .with_client_auth_cert(client_auth_certs, client_auth_key.ok_or_else(|| anyhow!("Client key is required but not found or invalid"))?)?;
+        .with_client_auth_cert(
+            client_auth_certs,
+            client_auth_key
+                .ok_or_else(|| anyhow!("Client key is required but not found or invalid"))?,
+        )?;
 
     if config.tls.accept_invalid_certs {
         #[derive(Debug)]
@@ -237,7 +249,9 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
         let verifier = NoopServerCertVerifier {
             supported_schemes: schemes,
         };
-        tls_config.dangerous().set_certificate_verifier(Arc::new(verifier));
+        tls_config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(verifier));
     }
 
     Ok(ConnectOptions::new().tls_client_config(tls_config))

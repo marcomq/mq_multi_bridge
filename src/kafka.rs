@@ -1,7 +1,7 @@
-use crate::model::CanonicalMessage;
 use crate::config::KafkaConfig;
+use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
+use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -38,7 +38,10 @@ impl KafkaSink {
             if let Some(key_file) = &config.tls.key_file {
                 client_config.set("ssl.key.location", key_file);
             }
-            client_config.set("enable.ssl.certificate.verification", (!config.tls.accept_invalid_certs).to_string());
+            client_config.set(
+                "enable.ssl.certificate.verification",
+                (!config.tls.accept_invalid_certs).to_string(),
+            );
         }
         let producer: FutureProducer = client_config.create()?;
         Ok(Self {
@@ -86,7 +89,8 @@ impl KafkaSource {
             .set("group.id", &config.group_id)
             .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
-            .set("auto.offset.reset", "earliest");
+            .set("auto.offset.reset", "earliest")
+            .set("socket.connection.setup.timeout.ms", "10000"); // 10 seconds
 
         if config.tls.required {
             client_config.set("security.protocol", "ssl");
@@ -99,24 +103,28 @@ impl KafkaSource {
             if let Some(key_file) = &config.tls.key_file {
                 client_config.set("ssl.key.location", key_file);
             }
-            client_config.set("enable.ssl.certificate.verification", (!config.tls.accept_invalid_certs).to_string());
+            client_config.set(
+                "enable.ssl.certificate.verification",
+                (!config.tls.accept_invalid_certs).to_string(),
+            );
         }
 
         let consumer: StreamConsumer = client_config.create()?;
+        if !topic.is_empty() {
+            consumer.subscribe(&[topic])?;
 
-        consumer.subscribe(&[topic])?;
-
-        info!(topic = %topic, "Kafka source subscribed");
+            info!(topic = %topic, "Kafka source subscribed");
+        }
 
         Ok(Self {
             consumer: Arc::new(Mutex::new(consumer)),
         })
     }
 
-    pub fn with_topic(&self, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+    pub async fn with_topic(&self, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
         let new_source = self.clone();
         {
-            let consumer = new_source.consumer.blocking_lock();
+            let consumer = new_source.consumer.lock().await;
             consumer.subscribe(&[topic])?;
         }
         info!(topic = %topic, "Kafka source subscribed to new topic");
@@ -165,6 +173,8 @@ impl MessageSource for KafkaSource {
 
 impl Clone for KafkaSource {
     fn clone(&self) -> Self {
-        Self { consumer: self.consumer.clone() }
+        Self {
+            consumer: self.consumer.clone(),
+        }
     }
 }
