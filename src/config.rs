@@ -10,9 +10,11 @@ use crate::{model::CanonicalMessage, sinks::MessageSink, sources::{BoxedMessageS
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KafkaConfig {
     pub brokers: String,
-    pub group_id: String,
+    pub group_id: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
     #[serde(default)]
-    pub tls: TlsConfig,
+    pub tls: ClientTlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -22,6 +24,16 @@ pub struct TlsConfig {
     pub ca_file: Option<String>,
     pub cert_file: Option<String>,
     pub key_file: Option<String>, // For PEM keys
+    pub cert_password: Option<String>, // For PKCS12 certs in AMQP
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ClientTlsConfig {
+    #[serde(default)]
+    pub required: bool,
+    pub ca_file: Option<String>,
+    pub cert_file: Option<String>,
+    pub key_file: Option<String>,
     pub cert_password: Option<String>,
     #[serde(default)]
     pub accept_invalid_certs: bool,
@@ -30,23 +42,30 @@ pub struct TlsConfig {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct NatsConfig {
     pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub token: Option<String>,
     pub default_stream: Option<String>,
     #[serde(flatten, default)]
-    pub tls: TlsConfig,
+    pub tls: ClientTlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AmqpConfig {
     pub url: String,
     #[serde(flatten, default)]
-    pub tls: TlsConfig,
+    pub tls: ClientTlsConfig,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct MqttConfig {
     pub url: String,
     #[serde(flatten, default)]
-    pub tls: TlsConfig,
+    pub tls: ClientTlsConfig,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -60,21 +79,26 @@ pub struct HttpConfig {
     pub url: Option<String>,
     pub response_sink: Option<String>,
     #[serde(flatten, default)]
-    pub tls: TlsConfig,
+    pub tls: TlsConfig, // Server-side TLS does not use accept_invalid_certs
 }
 
 impl TlsConfig {
     /// Checks if client-side mTLS is configured.
     pub fn is_mtls_client_configured(&self) -> bool {
-        self.required && self.cert_file.is_some() && self.key_file.is_some()
+        self.required && self.cert_file.is_some()
     }
 
     /// Checks if server-side TLS is configured.
     pub fn is_tls_server_configured(&self) -> bool {
-        self.required && self.cert_file.is_some() && self.key_file.is_some()
+        self.required && self.cert_file.is_some() && self.key_file.is_some() // Server needs both cert and key
     }
 }
 
+impl ClientTlsConfig {
+    pub fn is_mtls_client_configured(&self) -> bool {
+        self.required && self.cert_file.is_some()
+    }
+}
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionType {
@@ -446,7 +470,7 @@ routes:
 
         // Assert source
         if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
-            assert_eq!(k.config.brokers, "env-kafka:9092");
+            assert_eq!(k.config.brokers, "env-kafka:9092"); // group_id is now optional
             assert_eq!(k.endpoint.topic.as_deref(), Some("env-in-topic"));
         } else {
             panic!("Expected Kafka source");

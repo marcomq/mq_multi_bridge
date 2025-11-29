@@ -115,6 +115,10 @@ async fn create_client_and_eventloop(
     mqttoptions.set_keep_alive(Duration::from_secs(20));
     mqttoptions.set_clean_session(true);
 
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        mqttoptions.set_credentials(username, password);
+    }
+
     if config.tls.required {
         let mut root_cert_store = rustls::RootCertStore::empty();
         if let Some(ca_file) = &config.tls.ca_file {

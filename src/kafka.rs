@@ -43,6 +43,13 @@ impl KafkaSink {
                 (!config.tls.accept_invalid_certs).to_string(),
             );
         }
+
+        if let (Some(username), Some(password)) = (&config.username, &config.password) {
+            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.username", username);
+            client_config.set("sasl.password", password);
+            client_config.set("security.protocol", "sasl_ssl");
+        }
         let producer: FutureProducer = client_config.create()?;
         Ok(Self {
             producer,
@@ -85,8 +92,10 @@ use std::any::Any;
 impl KafkaSource {
     pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
         let mut client_config = ClientConfig::new();
-        client_config
-            .set("group.id", &config.group_id)
+        if let Some(group_id) = &config.group_id {
+            client_config.set("group.id", group_id);
+        }
+        client_config            
             .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
@@ -107,6 +116,12 @@ impl KafkaSource {
                 "enable.ssl.certificate.verification",
                 (!config.tls.accept_invalid_certs).to_string(),
             );
+        }
+        if let (Some(username), Some(password)) = (&config.username, &config.password) {
+            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.username", username);
+            client_config.set("sasl.password", password);
+            client_config.set("security.protocol", "sasl_ssl");
         }
 
         let consumer: StreamConsumer = client_config.create()?;

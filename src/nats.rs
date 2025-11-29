@@ -137,8 +137,16 @@ impl Clone for NatsSource {
 
 // ... rest of the file
 async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOptions> {
+    let mut options = if let Some(token) = &config.token {
+        ConnectOptions::with_token(token.clone())
+    } else if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        ConnectOptions::with_user_and_password(user.clone(), pass.clone())
+    } else {
+        ConnectOptions::new()
+    };
+
     if !config.tls.required {
-        return Ok(ConnectOptions::new());
+        return Ok(options);
     }
 
     let mut root_store = rustls::RootCertStore::empty();
@@ -149,34 +157,41 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
         }
     }
 
-    let mut client_auth_certs = Vec::new();
-    if let Some(cert_file) = &config.tls.cert_file {
+    let tls_config = if config.tls.is_mtls_client_configured() {
+        let cert_file = config.tls.cert_file.as_ref().unwrap();
+        let key_file = config.tls.key_file.as_ref(); // key_file is optional for some certs
+        let mut client_auth_certs = Vec::new();
         let mut pem = BufReader::new(std::fs::File::open(cert_file)?);
         for cert in rustls_pemfile::certs(&mut pem) {
             client_auth_certs.push(cert?);
         }
-    }
 
-    let mut client_auth_key = None;
-    if let Some(key_file) = &config.tls.key_file {
-        let key_bytes = tokio::fs::read(key_file).await?;
-        let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())
-            .collect::<Result<_, _>>()?;
-        if !keys.is_empty() {
-            client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0)));
+        let mut client_auth_key = None;
+        if let Some(key_file) = key_file {
+            let key_bytes = tokio::fs::read(key_file).await?;
+            let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())
+                .collect::<Result<_, _>>()?;
+            if !keys.is_empty() {
+                client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0)));
+            }
         }
-    }
 
-    let provider = rustls_ring::default_provider();
+        let provider = rustls_ring::default_provider(); // Corrected line
+        let tls_config_builder = ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(root_store);
 
-    let mut tls_config = ClientConfig::builder_with_provider(Arc::new(provider.clone()))
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_root_certificates(root_store)
-        .with_client_auth_cert(
+        let tls_config_builder = tls_config_builder.with_client_auth_cert(
             client_auth_certs,
             client_auth_key
                 .ok_or_else(|| anyhow!("Client key is required but not found or invalid"))?,
         )?;
+        tls_config_builder
+    } else {
+        ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
 
     if config.tls.accept_invalid_certs {
         #[derive(Debug)]
@@ -217,16 +232,20 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
                 self.supported_schemes.clone()
             }
         }
-        let schemes = provider
+        let schemes = rustls_ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes();
         let verifier = NoopServerCertVerifier {
             supported_schemes: schemes,
         };
-        tls_config
+        let mut new_tls_config = tls_config;
+        new_tls_config
             .dangerous()
             .set_certificate_verifier(Arc::new(verifier));
+        options = options.tls_client_config(new_tls_config);
+    } else {
+        options = options.tls_client_config(tls_config);
     }
 
-    Ok(ConnectOptions::new().tls_client_config(tls_config))
+    Ok(options)
 }

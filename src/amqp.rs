@@ -108,12 +108,23 @@ impl AmqpSource {
 
 async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connection> {
     info!(url = %config.url, "Connecting to AMQP broker");
+    let mut conn_uri = config.url.clone();
+
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        let mut url = url::Url::parse(&conn_uri)?;
+        url.set_username(user)
+            .map_err(|_| anyhow!("Failed to set username on AMQP URL"))?;
+        url.set_password(Some(pass))
+            .map_err(|_| anyhow!("Failed to set password on AMQP URL"))?;
+        conn_uri = url.to_string();
+    }
+
     let conn_props = ConnectionProperties::default();
     let conn = if config.tls.required {
         let tls_config = build_tls_config(config).await?;
-        Connection::connect_with_config(&config.url, conn_props, tls_config).await?
+        Connection::connect_with_config(&conn_uri, conn_props, tls_config).await?
     } else {
-        Connection::connect(&config.url, conn_props).await?
+        Connection::connect(&conn_uri, conn_props).await?
     };
     Ok(conn)
 }
