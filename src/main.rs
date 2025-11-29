@@ -2,7 +2,7 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
-
+use mq_multi_bridge::Bridge;
 // Use the library crate
 use mq_multi_bridge::config;
 use mq_multi_bridge::config::load_config;
@@ -49,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
     // --- 3. Run the bridge logic from the library ---
-    let mut bridge_handle = tokio::spawn(mq_multi_bridge::run(config, shutdown_rx));
+    let mut bridge = Bridge::from_config(config, shutdown_rx)?;
+    bridge.initialize_from_config().await?;
+
+    let mut bridge_handle = tokio::spawn(bridge.run());
 
     // --- 4. Wait for shutdown signal or task completion ---
     tokio::select! {

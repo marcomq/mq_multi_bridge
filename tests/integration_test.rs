@@ -118,7 +118,10 @@ async fn test_end_to_end_routing() {
 
     // Run the bridge in a separate task
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let bridge_task = tokio::spawn(mq_multi_bridge::run(test_config, shutdown_rx));
+    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, shutdown_rx).unwrap();
+    bridge.initialize_from_config().await.unwrap();
+
+    let bridge_task = tokio::spawn(bridge.run());
 
     // Give the bridge time to process all messages.
     // The file source will error on EOF, and the bridge will log it and continue.

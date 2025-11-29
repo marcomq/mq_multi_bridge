@@ -35,129 +35,168 @@ use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
 use std::sync::Arc;
 use metrics::{counter, histogram};
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
 
-/// The main entry point for running the bridge logic.
-/// This function can be called from `main.rs` or from integration tests.
-#[instrument(skip_all)]
-pub async fn run(
+pub struct Bridge {
     config: Config,
+    sources: HashMap<String, Arc<dyn MessageSource>>,
+    sinks: HashMap<String, Arc<dyn MessageSink>>,
+    dedup_store: Arc<DeduplicationStore>,
+    dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
+    bridge_tasks: Vec<tokio::task::JoinHandle<()>>, // The task itself returns (), JoinHandle wraps it in a Result for panics
     shutdown_rx: tokio::sync::watch::Receiver<()>,
-) -> anyhow::Result<()> {
-    info!(config = ?config, "Initializing Bridge Library");
+}
+
+impl Bridge {
+    /// Creates a new Bridge from a configuration object.
+    pub fn from_config(config: Config, shutdown_rx: tokio::sync::watch::Receiver<()>) -> Result<Self> {
+        let dedup_store = Arc::new(DeduplicationStore::new(
+            &config.sled_path,
+            config.dedup_ttl_seconds,
+        )?);
+
+        let bridge = Self {
+            config,
+            sources: HashMap::new(),
+            sinks: HashMap::new(),
+            dedup_store,
+            dlq_sink: None,
+            bridge_tasks: Vec::new(),
+            shutdown_rx,
+        };
+
+        Ok(bridge)
+    }
+
+    /// Adds a custom source to the bridge.
+    pub fn add_source(&mut self, name: &str, source: Arc<dyn MessageSource>) {
+        self.sources.insert(name.to_string(), source);
+    }
+
+    /// Adds a custom sink to the bridge.
+    pub fn add_sink(&mut self, name: &str, sink: Arc<dyn MessageSink>) {
+        self.sinks.insert(name.to_string(), sink);
+    }
+
+    /// Adds a route to the bridge, connecting a source to a sink.
+    pub async fn add_route(&mut self, route_name: &str, source_endpoint: &SourceEndpoint, sink_endpoint: &SinkEndpoint) -> Result<()> {
+        let source = create_source_from_route(&self.config, route_name, &self.sources, source_endpoint).await?;
+        let sink = create_sink_from_route(route_name, &self.sinks, sink_endpoint).await?;
+
+        let bridge_task = run_bridge_instance(
+            route_name.to_string(),
+            source,
+            sink,
+            self.dedup_store.clone(),
+            self.dlq_sink.clone(),
+            self.shutdown_rx.clone(),
+        );
+        self.bridge_tasks.push(tokio::spawn(bridge_task));
+        Ok(())
+    }
+
+    /// Initializes all connections and routes from the configuration.
+    pub async fn initialize_from_config(&mut self) -> Result<()> {
+        self.initialize_connections().await?;
+        self.initialize_dlq().await?;
+        for route in self.config.routes.clone() {
+            self.add_route(&route.name, &route.source, &route.sink).await?;
+        }
+        Ok(())
+    }
+
+    /// Runs all the configured bridge tasks and waits for them to complete.
+    pub async fn run(self) -> Result<()> {
+        info!("Starting all bridge tasks...");
+        for task in self.bridge_tasks {
+            task.await?; // Propagate panics from tasks
+        }
+        Ok(())
+    }
+
+    /// Initializes the DLQ sink if configured.
+    async fn initialize_dlq(&mut self) -> Result<()> {
+        if let Some(dlq_config) = &self.config.dlq {
+            let dlq_conn_sink = self.sinks.get(&dlq_config.connection).with_context(|| {
+                format!(
+                    "DLQ connection '{}' not found in defined connections",
+                    dlq_config.connection
+                )
+            })?;
+            let kafka_sink = dlq_conn_sink
+                .as_any()
+                .downcast_ref::<KafkaSink>()
+                .ok_or_else(|| anyhow!("DLQ connection must be of type Kafka"))?;
+            self.dlq_sink = Some(Arc::new(kafka_sink.with_topic(&dlq_config.kafka.topic)));
+        }
+        Ok(())
+    }
+
+    /// Creates and stores all connections defined in the config.
+    async fn initialize_connections(&mut self) -> Result<()> {
+        info!(config = ?self.config, "Initializing Bridge Library");
 
     // --- Validate connection names before any I/O ---
     let mut connection_names = HashSet::new();
-    for conn in &config.connections {
+    for conn in &self.config.connections {
         if !connection_names.insert(conn.name.clone()) {
             return Err(anyhow!("Duplicate connection name found: {}", conn.name));
         }
     }
 
-    // --- Initialize Shared Components ---
-    let dedup_store = Arc::new(DeduplicationStore::new(
-        &config.sled_path,
-        config.dedup_ttl_seconds,
-    )?);
-
     // --- Create connections ---
-    let mut sources: HashMap<String, Arc<dyn MessageSource + Send + Sync>> = HashMap::new();
-    let mut sinks: HashMap<String, Arc<dyn MessageSink + Send + Sync>> = HashMap::new();
-    for conn in &config.connections {
+    for conn in &self.config.connections {
         match &conn.connection_type {
             ConnectionType::Kafka(kafka_config) => {
                 // A Kafka connection can be both a source and a sink
                 let source = create_kafka_source(kafka_config, "").await?; // Topic will be set per-route
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
                 let sink = create_kafka_sink(kafka_config, "").await?; // Topic will be set per-route
-                sinks.insert(conn.name.clone(), sink);
+                self.sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::Nats(nats_config) => {
-                let sink = create_nats_sink(nats_config, "").await?;
-                sinks.insert(conn.name.clone(), sink);
                 let source = create_nats_source(nats_config, "").await?; // Stream name is set per-route
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
+                let sink = create_nats_sink(nats_config, "").await?;
+                self.sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::Amqp(amqp_config) => {
                 let source = create_amqp_source(amqp_config, "").await?;
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
                 let sink = create_amqp_sink(amqp_config).await?;
-                sinks.insert(conn.name.clone(), sink);
+                self.sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::Mqtt(mqtt_config) => {
                 let source = create_mqtt_source(mqtt_config, "").await?;
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
                 let sink = create_mqtt_sink(mqtt_config, "").await?;
-                sinks.insert(conn.name.clone(), sink);
+                self.sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::File(file_config) => {
                 let source = create_file_source(file_config).await?;
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
                 let sink = create_file_sink(file_config).await?;
-                sinks.insert(conn.name.clone(), sink);
+                self.sinks.insert(conn.name.clone(), sink);
             }
             ConnectionType::Http(http_config) => {
                 let source = create_http_source(http_config).await?;
-                sources.insert(conn.name.clone(), source);
+                self.sources.insert(conn.name.clone(), source);
                 let sink = create_http_sink(http_config).await?;
-                sinks.insert(conn.name.clone(), sink);
+                self.sinks.insert(conn.name.clone(), sink);
             }
         }
     }
-
-    // --- Create a DLQ sink if configured ---
-    let dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>> = if let Some(dlq_config) = &config.dlq {
-        let dlq_conn_sink = sinks.get(&dlq_config.connection).with_context(|| {
-            format!(
-                "DLQ connection '{}' not found in defined connections",
-                dlq_config.connection
-            )
-        })?;
-        let kafka_sink = dlq_conn_sink
-            .as_any()
-            .downcast_ref::<KafkaSink>()
-            .ok_or_else(|| anyhow!("DLQ connection must be of type Kafka"))?;
-        Some(Arc::new(kafka_sink.with_topic(&dlq_config.kafka.topic)))
-    } else {
-        None
-    };
-
-    // --- Create Sources and Sinks based on config ---
-    let mut bridge_tasks = Vec::new();
-
-    for route in &config.routes {
-        let source = create_source_from_route(&config, &route.name, &sources, &route.source).await?;
-        let sink = create_sink_from_route(&route.name, &sinks, &route.sink).await?;
-
-        let bridge_task = run_bridge_instance(
-            route.name.clone(),
-            source,
-            sink,
-            dedup_store.clone(),
-            dlq_sink.clone(),
-            shutdown_rx.clone(),
-        );
-        bridge_tasks.push(tokio::spawn(bridge_task));
+        Ok(())
     }
-
-    info!("Starting all bridge tasks...");
-
-    // Run all bridge tasks concurrently.
-    // The `run` function will return if any of the tasks fail.
-    for task in bridge_tasks {
-        task.await?; // This will propagate panics from tasks.
-    }
-
-    Ok(())
 }
 
 async fn create_source_from_route(
     config: &Config,
     route_name: &str,
-    sources: &HashMap<String, Arc<dyn MessageSource + Send + Sync>>,
+    sources: &HashMap<String, Arc<dyn MessageSource>>,
     endpoint: &SourceEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     let conn_source = sources
@@ -228,7 +267,7 @@ async fn create_source_from_route(
 
 async fn create_sink_from_route(
     route_name: &str,
-    sinks: &HashMap<String, Arc<dyn MessageSink + Send + Sync>>,
+    sinks: &HashMap<String, Arc<dyn MessageSink>>,
     endpoint: &SinkEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     let conn_sink = sinks
@@ -404,7 +443,7 @@ mod tests {
     use super::*;
     use crate::config::{Connection, DlqConfig, DlqKafkaEndpoint};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_run_duplicate_connection_name() {
         let config = Config {
             log_level: "info".to_string(),
@@ -430,11 +469,12 @@ mod tests {
         };
 
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-        let result = run(config, shutdown_rx).await;
+        let mut bridge = Bridge::from_config(config, shutdown_rx).unwrap();
+        let result = bridge.initialize_connections().await;
 
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err().to_string(),
+            result.err().unwrap().to_string(),
             "Duplicate connection name found: conn1"
         );
     }
