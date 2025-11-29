@@ -53,14 +53,14 @@ impl Clone for FileSink {
 
 #[async_trait]
 impl MessageSink for FileSink {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut payload = serde_json::to_vec(&message)?;
         payload.push(b'\n'); // Add a newline to separate messages
 
         let mut writer = self.writer.lock().await;
         writer.write_all(&payload).await?;
         writer.flush().await?; // Ensure it's written to disk
-        Ok(())
+        Ok(None)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -103,12 +103,12 @@ mod tests {
 
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
-        commit1().await; // Commit is a no-op, but we should call it
+        commit1(None).await; // Commit is a no-op, but we should call it
         assert_eq!(received_msg1.message_id, msg1.message_id);
         assert_eq!(received_msg1.payload, msg1.payload);
 
         let (received_msg2, commit2) = source.receive().await.unwrap();
-        commit2().await;
+        commit2(None).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
@@ -178,7 +178,7 @@ impl MessageSource for FileSource {
         let message: CanonicalMessage = serde_json::from_str(&line)?;
 
         // The commit for a file source is a no-op.
-        let commit = Box::new(move || Box::pin(async move {}) as BoxFuture<'static, ()>);
+        let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
         Ok((message, commit))
     }

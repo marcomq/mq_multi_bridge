@@ -36,6 +36,8 @@ async-nats = "0.35.0"
 rdkafka = { version = "0.38", features = ["tokio"] }
 lapin = { version = "3.7", features = ["rustls"] }
 rumqttc = { version = "0.24" }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json"] }
 
 futures = "0.3.30"
 url = "2.5"

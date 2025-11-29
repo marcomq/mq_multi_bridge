@@ -1,7 +1,7 @@
 use crate::model::CanonicalMessage;
 use crate::config::KafkaConfig;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -57,7 +57,7 @@ impl KafkaSink {
 
 #[async_trait]
 impl MessageSink for KafkaSink {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_string(&message)?;
         let key: String = message.message_id.to_string();
         let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
@@ -66,7 +66,7 @@ impl MessageSink for KafkaSink {
             .send(record, Duration::from_secs(5))
             .await
             .map_err(|(e, _)| anyhow!("Kafka send error: {}", e))?;
-        Ok(())
+        Ok(None)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -145,7 +145,7 @@ impl MessageSource for KafkaSource {
             message.partition(),
             Offset::Offset(message.offset() + 1),
         )?;
-        let commit = Box::new(move || {
+        let commit = Box::new(move |_response| {
             let consumer_arc_clone = consumer_arc.clone();
             Box::pin(async move {
                 let consumer = consumer_arc_clone.lock().await;

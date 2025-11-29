@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
 pub mod amqp;
+pub mod http;
 pub mod file;
 pub mod config;
 pub mod kafka;
@@ -18,11 +19,13 @@ use std::collections::HashSet;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpEndpoint, Config, ConnectionType, FileConfig, FileEndpoint, KafkaConfig,
-    KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint, SinkEndpoint,
+    AmqpConfig, AmqpEndpoint, Config, ConnectionType, FileConfig, FileEndpoint, HttpConfig,
+    HttpEndpoint, KafkaConfig, KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint,
+    SinkEndpoint,
     SinkEndpointType, SourceEndpoint, SourceEndpointType,
 };
 use crate::file::{FileSink, FileSource};
+use crate::http::{HttpSink, HttpSource};
 use crate::kafka::KafkaSink;
 use crate::mqtt::{MqttSink, MqttSource};
 use crate::nats::NatsSink;
@@ -94,6 +97,12 @@ pub async fn run(
                 let source = create_file_source(file_config).await?;
                 sources.insert(conn.name.clone(), source);
                 let sink = create_file_sink(file_config).await?;
+                sinks.insert(conn.name.clone(), sink);
+            }
+            ConnectionType::Http(http_config) => {
+                let source = create_http_source(http_config).await?;
+                sources.insert(conn.name.clone(), source);
+                let sink = create_http_sink(http_config).await?;
                 sinks.insert(conn.name.clone(), sink);
             }
         }
@@ -202,6 +211,13 @@ async fn create_source_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not a File source", endpoint.connection))?;
             Ok(Arc::new(file_source.clone())) // FileSource can be cloned
         }
+        SourceEndpointType::Http(HttpEndpoint { .. }) => {
+            let http_source = conn_source
+                .as_any()
+                .downcast_ref::<HttpSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a Http source", endpoint.connection))?;
+            Ok(Arc::new(http_source.clone()))
+        }
     }
 }
 
@@ -249,6 +265,13 @@ async fn create_sink_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not a File sink", endpoint.connection))?;
             Ok(Arc::new(file_sink.clone())) // FileSink can be cloned
         }
+        SinkEndpointType::Http(HttpEndpoint { url }) => {
+            let http_sink = conn_sink
+                .as_any()
+                .downcast_ref::<HttpSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a Http sink", endpoint.connection))?;
+            Ok(Arc::new(http_sink.with_url(url.as_deref().unwrap_or_default())))
+        }
     }
 }
 
@@ -282,6 +305,12 @@ async fn create_file_source(config: &FileConfig) -> anyhow::Result<Arc<dyn Messa
 async fn create_file_sink(config: &FileConfig) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     Ok(Arc::new(FileSink::new(config).await?))
 }
+async fn create_http_source(config: &HttpConfig) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(HttpSource::new(config).await?))
+}
+async fn create_http_sink(config: &HttpConfig) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(HttpSink::new(config).await?))
+}
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]
 async fn run_bridge_instance(
@@ -312,7 +341,7 @@ async fn run_bridge_instance(
                         if dedup_store.is_duplicate(&msg_id).unwrap_or(false) {
                             warn!(message_id = %msg_id, "Duplicate message detected, skipping.");
                             counter!("bridge_messages_duplicate_total", "route" => bridge_id.clone()).increment(1);
-                            commit().await; // Commit even if duplicate to remove from source queue
+                            commit(None).await; // Commit even if duplicate to remove from source queue
                             continue;
                         }
 
@@ -320,13 +349,13 @@ async fn run_bridge_instance(
                         let max_attempts = 5;
                         loop {
                             attempts += 1;
-                            match sink.send(message.clone()).await {
-                                Ok(_) => {
+                            match sink.send(message.clone()).await { // Sink now returns Option<CanonicalMessage>
+                                Ok(response_message) => {
                                     let duration = processing_start.elapsed();
                                     info!(message_id = %msg_id, "Successfully forwarded message");
                                     counter!("bridge_messages_sent_total", "route" => bridge_id.clone()).increment(1);
                                     histogram!("bridge_message_processing_duration_seconds", "route" => bridge_id.clone()).record(duration.as_secs_f64());
-                                    commit().await; // ACK source only after successful sink
+                                    commit(response_message).await; // ACK source only after successful sink
                                     break;
                                 }
                                 Err(e) => {
@@ -338,7 +367,7 @@ async fn run_bridge_instance(
                                                 error!(message_id = %msg_id, error = %dlq_err, "Failed to send to DLQ!");
                                             }
                                         }
-                                        commit().await; // Commit original message after moving to DLQ
+                                        commit(None).await; // Commit original message after moving to DLQ
                                         break;
                                     } else {
                                     }

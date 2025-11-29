@@ -58,6 +58,14 @@ pub struct FileConfig {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct HttpConfig {
+    pub listen_address: Option<String>,
+    pub url: Option<String>,
+    // Optional sink to send the HTTP response to
+    pub response_sink: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionType {
@@ -66,6 +74,7 @@ pub enum ConnectionType {
     Amqp(AmqpConfig),
     Mqtt(MqttConfig),
     File(FileConfig),
+    Http(HttpConfig),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -93,6 +102,11 @@ pub struct MqttEndpoint {
 pub struct FileEndpoint {}
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct HttpEndpoint {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub struct SourceEndpoint {
     pub connection: String,
@@ -108,6 +122,7 @@ pub enum SourceEndpointType {
     Amqp(AmqpEndpoint),
     Mqtt(MqttEndpoint),
     File(FileEndpoint),
+    Http(HttpEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -156,6 +171,7 @@ pub enum SinkEndpointType {
     Amqp(AmqpEndpoint),
     Mqtt(MqttEndpoint),
     File(FileEndpoint),
+    Http(HttpEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -225,6 +241,9 @@ connections:
   - name: "output_log"
     file:
       path: "/tmp/output.log"
+  - name: "http_server"
+    http:
+      listen_address: "0.0.0.0:8080"
 
 dlq:
   connection: "kafka_main"
@@ -249,7 +268,7 @@ routes:
         let config = config.unwrap();
 
         assert_eq!(config.log_level, "debug");
-        assert_eq!(config.connections.len(), 3);
+        assert_eq!(config.connections.len(), 4);
         assert_eq!(config.routes.len(), 1);
         assert!(config.dlq.is_some());
 

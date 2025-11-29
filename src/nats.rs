@@ -1,7 +1,7 @@
 use crate::model::CanonicalMessage;
 use crate::config::NatsConfig;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
 use anyhow::anyhow;
 use async_nats::{jetstream, Client, ConnectOptions};
 use async_trait::async_trait;
@@ -45,13 +45,13 @@ impl NatsSink {
 
 #[async_trait]
 impl MessageSink for NatsSink {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_vec(&message)?;
         self.client
             .publish(self.subject.clone(), payload.into())
             .await?;
         self.client.flush().await?; // Ensures the message is sent
-        Ok(())
+        Ok(None)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -127,7 +127,7 @@ impl MessageSource for NatsSource {
         let canonical_message: CanonicalMessage =
             serde_json::from_slice(&message.payload).map_err(anyhow::Error::from)?;
 
-        let commit = Box::new(move || {
+        let commit = Box::new(move |_response| {
             Box::pin(async move {
                 message
                     .ack()

@@ -1,7 +1,7 @@
 use crate::model::CanonicalMessage;
 use crate::config::AmqpConfig;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -47,7 +47,7 @@ impl AmqpSink {
 
 #[async_trait]
 impl MessageSink for AmqpSink {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_vec(&message)?;
         self.channel
             .basic_publish(
@@ -59,7 +59,7 @@ impl MessageSink for AmqpSink {
             )
             .await?
             .await?; // Wait for publisher confirm
-        Ok(())
+        Ok(None)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -148,7 +148,7 @@ impl MessageSource for AmqpSource {
             serde_json::from_slice(&delivery.data).map_err(anyhow::Error::from)?;
         let message = CanonicalMessage::new(payload);
 
-        let commit = Box::new(move || {
+        let commit = Box::new(move |_response| {
             Box::pin(async move {
                 delivery
                     .ack(BasicAckOptions::default())

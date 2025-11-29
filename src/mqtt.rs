@@ -1,7 +1,7 @@
 use crate::config::MqttConfig;
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::sources::{BoxedMessageStream, MessageSource, BoxFuture};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{
@@ -37,12 +37,12 @@ impl MqttSink {
 
 #[async_trait]
 impl MessageSink for MqttSink {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_string(&message)?;
         self.client
             .publish(&self.topic, QoS::AtLeastOnce, false, payload)
             .await?;
-        Ok(())
+        Ok(None)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -82,7 +82,7 @@ impl MessageSource for MqttSource {
                 Ok(Event::Incoming(Incoming::Publish(p))) => {
                     let canonical_message: CanonicalMessage = serde_json::from_slice(&p.payload)?;
 
-                    let commit = Box::new(move || {
+                    let commit = Box::new(move |_response| {
                         Box::pin(async move {
                             // With rumqttc, acks are handled internally for QoS 1.
                             // This closure is called after successful processing.
