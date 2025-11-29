@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -16,7 +17,7 @@ pub struct TlsConfig {
     pub required: bool,
     pub ca_file: Option<String>,
     pub cert_file: Option<String>,
-    pub key_file: Option<String>,
+    pub key_file: Option<String>, // For PEM keys
     pub cert_password: Option<String>,
     #[serde(default)]
     pub accept_invalid_certs: bool,
@@ -26,32 +27,21 @@ pub struct TlsConfig {
 pub struct NatsConfig {
     pub url: String,
     pub default_stream: Option<String>,
-    #[serde(default)]
-    pub tls: NatsTlsConfig,
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct NatsTlsConfig {
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub accept_invalid_certs: bool,
-    pub ca_file: Option<String>,
-    pub cert_file: Option<String>,
-    pub key_file: Option<String>,
+    #[serde(flatten, default)]
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct AmqpConfig {
     pub url: String,
-    #[serde(default)]
+    #[serde(flatten, default)]
     pub tls: TlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct MqttConfig {
     pub url: String,
-    #[serde(default)]
+    #[serde(flatten, default)]
     pub tls: TlsConfig,
 }
 
@@ -64,8 +54,21 @@ pub struct FileConfig {
 pub struct HttpConfig {
     pub listen_address: Option<String>,
     pub url: Option<String>,
-    // Optional sink to send the HTTP response to
     pub response_sink: Option<String>,
+    #[serde(flatten, default)]
+    pub tls: TlsConfig,
+}
+
+impl TlsConfig {
+    /// Checks if client-side mTLS is configured.
+    pub fn is_mtls_client_configured(&self) -> bool {
+        self.required && self.cert_file.is_some() && self.key_file.is_some()
+    }
+
+    /// Checks if server-side TLS is configured.
+    pub fn is_tls_server_configured(&self) -> bool {
+        self.required && self.cert_file.is_some() && self.key_file.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

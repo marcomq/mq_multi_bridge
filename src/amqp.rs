@@ -119,10 +119,13 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
 }
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {
-    let cert_chain = config.tls.ca_file.clone();
+    // For AMQP, cert_chain is the CA file.
+    let ca_file = config.tls.ca_file.clone();
 
-    let identity = if let Some(pkcs12_file) = &config.tls.cert_file {
-        let der = tokio::fs::read(pkcs12_file).await?;
+    let identity = if let Some(cert_file) = &config.tls.cert_file {
+        // For lapin, client identity is provided via a PKCS12 file.
+        // The `cert_file` is assumed to be the PKCS12 bundle. The `key_file` is not used.
+        let der = tokio::fs::read(cert_file).await?;
         let password = config.tls.cert_password.clone().unwrap_or_default();
         Some(OwnedIdentity::PKCS12 { der, password })
     } else {
@@ -131,7 +134,7 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 
     Ok(OwnedTLSConfig {
         identity,
-        cert_chain,
+        cert_chain: ca_file,
     })
 }
 

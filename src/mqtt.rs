@@ -125,14 +125,23 @@ async fn create_client_and_eventloop(
             }
         }
 
-        let client_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
+        let client_config_builder =
+            rustls::ClientConfig::builder().with_root_certificates(root_cert_store);
 
-        // Note: rumqttc's default rustls integration doesn't easily support client certs.
-        // This would require a custom transport implementation if needed.
+        let mut client_config = if config.tls.is_mtls_client_configured() {
+            let cert_file = config.tls.cert_file.as_ref().unwrap();
+            let key_file = config.tls.key_file.as_ref().unwrap();
+            let cert_chain = load_certs(cert_file)?;
+            let key_der = load_private_key(key_file)?;
+            client_config_builder.with_client_auth_cert(cert_chain, key_der)?
+        } else {
+            client_config_builder.with_no_client_auth()
+        };
+
         if config.tls.accept_invalid_certs {
-            warn!("accept_invalid_certs is not supported by rumqttc's default TLS. Certificates will be validated.");
+            warn!("MQTT TLS is configured to accept invalid certificates. This is insecure and should not be used in production.");
+            let mut dangerous_config = client_config.dangerous();
+            dangerous_config.set_certificate_verifier(Arc::new(NoopServerCertVerifier {}));
         }
         mqttoptions.set_transport(Transport::tls_with_config(client_config.into()));
     }
@@ -140,6 +149,43 @@ async fn create_client_and_eventloop(
     let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
     info!(url = %config.url, "Connected to MQTT broker");
     Ok((client, eventloop))
+}
+
+fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let mut cert_buf = std::io::BufReader::new(std::fs::File::open(path)?);
+    Ok(rustls_pemfile::certs(&mut cert_buf).collect::<Result<Vec<_>, _>>()?)
+}
+
+fn load_private_key(
+    path: &str,
+) -> anyhow::Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let mut key_buf = std::io::BufReader::new(std::fs::File::open(path)?);
+    let key = rustls_pemfile::private_key(&mut key_buf)?
+        .ok_or_else(|| anyhow!("No private key found in {}", path))?;
+    Ok(key)
+}
+
+/// A rustls certificate verifier that does not perform any validation.
+#[derive(Debug)]
+struct NoopServerCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoopServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> { Ok(rustls::client::danger::HandshakeSignatureValid::assertion()) }
+
+    fn verify_tls13_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> { Ok(rustls::client::danger::HandshakeSignatureValid::assertion()) }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes() }
 }
 
 fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {

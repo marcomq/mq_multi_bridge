@@ -16,6 +16,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use axum_server::{tls_rustls::RustlsConfig, Handle};
 use serde_json::Value;
 use std::any::Any;
 use std::net::SocketAddr;
@@ -50,10 +51,29 @@ impl HttpSource {
             .parse()
             .with_context(|| format!("Invalid listen address: {}", listen_address))?;
 
+        let tls_config = config.tls.clone();
+        let handle = Handle::new();
+
         tokio::spawn(async move {
-            info!("HTTP source listening on {}", addr);
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+            if tls_config.is_tls_server_configured() {
+                info!("Starting HTTPS source on {}", addr);
+                // We clone the paths to move them into the async block.
+                let cert_path = tls_config.cert_file.unwrap();
+                let key_path = tls_config.key_file.unwrap();
+
+                let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .unwrap();
+                axum_server::bind_rustls(addr, tls_config)
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                    .unwrap();
+            } else {
+                info!("Starting HTTP source on {}", addr);
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                axum::serve(listener, app).await.unwrap();
+            }
         });
 
         Ok(Self {
@@ -132,8 +152,19 @@ pub struct HttpSink {
 
 impl HttpSink {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
+        let mut client_builder = reqwest::Client::builder();
+
+        if config.tls.is_mtls_client_configured() {
+            let cert_path = config.tls.cert_file.as_ref().unwrap();
+            let key_path = config.tls.key_file.as_ref().unwrap();
+            let cert = tokio::fs::read(cert_path).await?;
+            let key = tokio::fs::read(key_path).await?;
+            let identity = reqwest::Identity::from_pem(&[cert, key].concat())?;
+            client_builder = client_builder.identity(identity);
+        }
+
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: client_builder.build()?,
             url: config.url.clone().unwrap_or_default(),
             response_sink: config.response_sink.clone(),
         })
