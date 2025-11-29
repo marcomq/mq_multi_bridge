@@ -1,91 +1,92 @@
+# This configuration file is designed for integration testing.
+# It sets up routes to test message passing through various brokers.
+# The general pattern for each broker is:
+#   1. A route that reads from a common input file (`/tmp/input.log`) and sends to the broker.
+#   2. A route that reads from the broker and writes to a unique output file (e.g., `/tmp/output_kafka.log`).
+#
+# To run the test:
+#   1. Start the services: `docker-compose -f tests/docker-compose.integration.yml up -d`
+#   2. Write a JSON message to `/tmp/input.log`. Example:
+#      echo '{"message_id": "a1fa021b-b7d7-48ca-9088-05b5b82711de", "payload": "hello integration test"}' > /tmp/input.log
+#   3. Run the bridge: `CONFIG_FILE=tests/config.integration.yml cargo run`
+#   4. Check the output files (`/tmp/output_*.log`) to verify message delivery.
+
 log_level: "info"
 logger: "plain"
 sled_path: "/tmp/integration_test_db"
 dedup_ttl_seconds: 60
 
-connections:
-  - name: "file_in"
-    file:
-      path: "/tmp/input.log"
-  - name: "file_out_kafka"
-    file:
-      path: "/tmp/output_kafka.log"
-  - name: "file_out_nats"
-    file:
-      path: "/tmp/output_nats.log"
-  - name: "file_out_amqp"
-    file:
-      path: "/tmp/output_amqp.log"
-  - name: "file_out_mqtt"
-    file:
-      path: "/tmp/output_mqtt.log"
-
-  - name: "kafka_test"
-    kafka:
-      brokers: "localhost:9092"
-      group_id: "integration_test_group"
-  - name: "nats_test"
-    nats:
-      url: "nats://localhost:4222"
-      default_stream: "test-stream"
-  - name: "amqp_test"
-    amqp:
-      url: "amqp://guest:guest@localhost:5672/%2f"
-  - name: "mqtt_test"
-    mqtt:
-      url: "mqtt://localhost:1883"
-
 routes:
-  # Kafka Route
-  - name: "file_to_kafka"
+  # --- Kafka Test Routes ---
+  # Reads from /tmp/input.log and sends to Kafka topic 'test_topic_kafka'
+  file_to_kafka:
     source:
-      connection: "file_in"
-      file: {}
+      file:
+        path: "/tmp/input.log"
     sink:
-      connection: "kafka_test"
       kafka:
+        brokers: "localhost:9092"
         topic: "test_topic_kafka"
-  - name: "kafka_to_file"
-    source:
-      connection: "kafka_test"
-      kafka:
-        topic: "test_topic_kafka"
-    sink:
-      connection: "file_out_kafka"
-      file: {}
 
-  # NATS Route
-  - name: "file_to_nats"
+  # Reads from Kafka topic 'test_topic_kafka' and writes to /tmp/output_kafka.log
+  kafka_to_file:
     source:
-      connection: "file_in"
-      file: {}
+      kafka:
+        brokers: "localhost:9092"
+        group_id: "integration_test_group_kafka"
+        topic: "test_topic_kafka"
     sink:
-      connection: "nats_test"
-      nats:
-        subject: "test_subject_nats"
-  - name: "nats_to_file"
+      file:
+        path: "/tmp/output_kafka.log"
+
+  # --- NATS Test Routes ---
+  # Reads from /tmp/input.log and sends to NATS subject 'test_subject_nats'
+  file_to_nats:
     source:
-      connection: "nats_test"
+      file:
+        path: "/tmp/input.log"
+    sink:
       nats:
+        url: "nats://localhost:4222"
+        subject: "test_subject_nats"
+
+  # Reads from NATS subject 'test_subject_nats' and writes to /tmp/output_nats.log
+  nats_to_file:
+    source:
+      nats:
+        url: "nats://localhost:4222"
         subject: "test_subject_nats"
         stream: "test-stream"
     sink:
-      connection: "file_out_nats"
-      file: {}
+      file:
+        path: "/tmp/output_nats.log"
 
-  # AMQP/RabbitMQ Route (Note: AMQP source/sink will use the route name as queue name by default)
-  - name: "file_to_amqp"
-    source: { connection: "file_in", file: {} }
-    sink: { connection: "amqp_test", amqp: { queue: "test_queue_amqp" } }
-  - name: "amqp_to_file"
-    source: { connection: "amqp_test", amqp: { queue: "test_queue_amqp" } }
-    sink: { connection: "file_out_amqp", file: {} }
+  # --- AMQP (RabbitMQ) Test Routes ---
+  # Reads from /tmp/input.log and sends to AMQP queue 'test_queue_amqp'
+  file_to_amqp:
+    source:
+      file: { path: "/tmp/input.log" }
+    sink:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
 
-  # MQTT Route
-  - name: "file_to_mqtt"
-    source: { connection: "file_in", file: {} }
-    sink: { connection: "mqtt_test", mqtt: { topic: "test_topic_mqtt" } }
-  - name: "mqtt_to_file"
-    source: { connection: "mqtt_test", mqtt: { topic: "test_topic_mqtt" } }
-    sink: { connection: "file_out_mqtt", file: {} }
+  # Reads from AMQP queue 'test_queue_amqp' and writes to /tmp/output_amqp.log
+  amqp_to_file:
+    source:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
+    sink:
+      file: { path: "/tmp/output_amqp.log" }
 
+  # --- MQTT Test Routes ---
+  # Reads from /tmp/input.log and sends to MQTT topic 'test_topic_mqtt'
+  file_to_mqtt:
+    source:
+      file: { path: "/tmp/input.log" }
+    sink:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+
+  # Reads from MQTT topic 'test_topic_mqtt' and writes to /tmp/output_mqtt.log
+  mqtt_to_file:
+    source:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+    sink:
+      file: { path: "/tmp/output_mqtt.log" }

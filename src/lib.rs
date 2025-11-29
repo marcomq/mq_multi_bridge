@@ -18,7 +18,7 @@ pub mod store;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, EmptyEndpoint, FileConfig, FileSinkEndpoint, FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig, KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, Route, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType, StaticResponseEndpoint
+    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, FileConfig, FileSinkEndpoint, FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig, KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, Route, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType, StaticResponseEndpoint
 };
 use crate::file::{FileSink, FileSource};
 use crate::http::{HttpSink, HttpSource};
@@ -35,7 +35,7 @@ use metrics::{counter, histogram};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument, trace, warn};
 
 pub struct Bridge {
     config: Config,
@@ -112,9 +112,6 @@ impl Bridge {
     /// Initializes all connections and routes from the configuration.
     pub async fn initialize_from_config(&mut self) -> Result<()> {
         for (name, route) in self.config.routes.clone() {
-            if let SourceEndpointType::Empty(_) = route.source.endpoint_type {
-                continue;
-            }
             match self.add_route(&name, &route).await {
                 Ok(_) => (),
                 Err(e) => {
@@ -165,9 +162,6 @@ async fn create_source_from_route(
             create_file_source(config).await
         }
         SourceEndpointType::Http(HttpSourceEndpoint { config, .. }) => create_http_source(config).await,
-        SourceEndpointType::Empty(_) => {
-            Ok(Arc::new(EmptyEndpoint{}))
-        }
     }
 }
 
@@ -202,9 +196,6 @@ async fn create_sink_from_route(
         }
         SinkEndpointType::StaticResponse(config) => {
             create_static_response_sink(config).await
-        }
-        SinkEndpointType::Empty(_) => {
-            Ok(Arc::new(EmptyEndpoint{}))
         }
     }
 }
@@ -289,6 +280,7 @@ async fn run_bridge_instance(
     dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
     mut shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 ) {
+    trace!("Starting bridge id {}", bridge_id);
     loop {
         tokio::select! {
             // Biased ensures we check for shutdown first if both are ready
@@ -309,7 +301,7 @@ async fn run_bridge_instance(
                     Ok((message, commit)) => {
                         let msg_id = message.message_id;
                         let processing_start = std::time::Instant::now();
-                        info!(message_id = %msg_id, "Received message");
+                        trace!(message_id = %msg_id, "Received message");
                         counter!("bridge_messages_received_total", "route" => bridge_id.clone()).increment(1);
 
                         if dedup_store.is_duplicate(&msg_id).unwrap_or(false) {
@@ -326,7 +318,7 @@ async fn run_bridge_instance(
                             match sink.send(message.clone()).await { // Sink now returns Option<CanonicalMessage>
                                 Ok(response_message) => {
                                     let duration = processing_start.elapsed();
-                                    info!(message_id = %msg_id, "Successfully forwarded message");
+                                    trace!(message_id = %msg_id, "Successfully forwarded message");
                                     counter!("bridge_messages_sent_total", "route" => bridge_id.clone()).increment(1);
                                     histogram!("bridge_message_processing_duration_seconds", "route" => bridge_id.clone()).record(duration.as_secs_f64());
                                     commit(response_message).await; // ACK source only after successful sink
@@ -353,6 +345,11 @@ async fn run_bridge_instance(
                         }
                     }
                     Err(e) => {
+                        // Special handling for FileSource: if it reaches EOF, we can gracefully shut down this bridge instance.
+                        if e.to_string().contains("End of file reached") {
+                            info!("Source file reached EOF. Shutting down this bridge instance.");
+                            break; // Exit the loop
+                        }
                         error!(error = %e, "Error receiving message from source. Reconnecting in 5s...");
                         sleep(Duration::from_secs(5)).await;
                     }

@@ -2,10 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use std::collections::HashMap;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-use crate::{model::CanonicalMessage, sinks::MessageSink, sources::{BoxedMessageStream, MessageSource}};
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KafkaConfig {
@@ -163,7 +160,6 @@ pub enum SourceEndpointType {
     Mqtt(MqttSourceEndpoint),
     File(FileSourceEndpoint),
     Http(HttpSourceEndpoint),
-    Empty(EmptyEndpoint), // just needed for env variables
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -208,7 +204,6 @@ pub enum SinkEndpointType {
     File(FileSinkEndpoint),
     Http(HttpSinkEndpoint),
     StaticResponse(StaticResponseEndpoint),
-    Empty(EmptyEndpoint), // just needed for env variables
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -281,32 +276,6 @@ pub struct HttpSourceEndpoint {
     pub config: HttpConfig,
     #[serde(flatten)]
     pub endpoint: HttpEndpoint,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct EmptyEndpoint;
-
-
-#[async_trait]
-impl MessageSink for EmptyEndpoint {
-    async fn send(&self, _message: crate::model::CanonicalMessage) -> anyhow::Result<Option<crate::model::CanonicalMessage>> {
-        Ok(None)
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-#[async_trait]
-impl MessageSource for EmptyEndpoint {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        Err(anyhow::anyhow!("EmptyEndpoint cannot receive messages"))
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -476,4 +445,75 @@ routes:
             panic!("Expected Kafka source");
         }
     }
+
+    // This macro helps create small, focused tests for each configuration type.
+    macro_rules! test_config_deserialization {
+        ($test_name:ident, $yaml:expr, $struct_type:ty) => {
+            #[test]
+            fn $test_name() {
+                let yaml_config = $yaml;
+                let result: Result<$struct_type, _> = serde_yaml::from_str(yaml_config);
+                assert!(
+                    result.is_ok(),
+                    "Failed to deserialize for {}: {:?}",
+                    stringify!($test_name),
+                    result.err()
+                );
+            }
+        };
+    }
+
+    // --- Test individual route configurations ---
+
+    test_config_deserialization!(
+        test_kafka_route_config,
+        r#"
+        source:
+          kafka:
+            brokers: "localhost:9092"
+            group_id: "test-group"
+        sink:
+          file:
+            path: "/dev/null"
+        "#,
+        Route
+    );
+
+    test_config_deserialization!(
+        test_nats_route_config,
+        r#"
+        source:
+          nats:
+            url: "localhost:4222"
+            stream: "test-stream"
+            subject: "test-subject"
+        sink:
+          file:
+            path: "/dev/null"
+        "#,
+        Route
+    );
+
+    test_config_deserialization!(
+        test_amqp_route_config,
+        r#"
+        source:
+          amqp:
+            url: "amqp://guest:guest@localhost:5672"
+            queue: "test-queue"
+        sink:
+          file:
+            path: "/dev/null"
+        "#,
+        Route
+    );
+
+    test_config_deserialization!(
+        test_http_source_route_config,
+        r#"
+        source: { http: { listen_address: "0.0.0.0:8080" } }
+        sink: { file: { path: "/dev/null" } }
+        "#,
+        Route
+    );
 }

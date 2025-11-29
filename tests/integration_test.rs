@@ -4,11 +4,12 @@ use mq_multi_bridge::model::CanonicalMessage;
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 struct DockerCompose {
     child: Child,
@@ -29,7 +30,7 @@ impl DockerCompose {
 
         // Give services time to initialize
         println!("Waiting for services to initialize...");
-        thread::sleep(Duration::from_secs(45)); // May need adjustment
+        thread::sleep(Duration::from_secs(15)); // May need adjustment
         println!("Services should be up.");
 
         Self { child }
@@ -66,7 +67,12 @@ fn generate_test_file(path: &std::path::Path, num_messages: usize) -> HashSet<St
 }
 
 fn read_output_file(path: &std::path::Path) -> HashSet<String> {
-    let file = File::open(path).expect(&format!("Failed to open output file: {:?}", path));
+    if !path.exists() {
+        // Return an empty set if the file doesn't exist. The assertion on message count will fail with a clearer message.
+        println!("WARNING: Output file not found: {:?}. Assuming no messages were received.", path);
+        return HashSet::new();
+    }
+    let file = File::open(path).unwrap_or_else(|_| panic!("Failed to open output file: {:?}", path));
     let reader = BufReader::new(file);
     let mut received_messages = HashSet::new();
 
@@ -82,17 +88,18 @@ fn read_output_file(path: &std::path::Path) -> HashSet<String> {
     received_messages
 }
 
-#[tokio::test]
-#[ignore] // This test is long and requires docker, run explicitly with `cargo test -- --ignored`
-async fn test_end_to_end_routing() {
-    let _docker_guard = DockerCompose::up();
-
+/// Helper function to run a single end-to-end test pipeline.
+async fn run_pipeline_test(
+    broker_name: &str,
+    file_to_broker_route: &str,
+    broker_to_file_route: &str,
+) {    
+    let _logger = tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE) // Log entry and exit of spans
+        .with_target(true).init();
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.log");
-    let output_kafka_path = temp_dir.path().join("output_kafka.log");
-    let output_nats_path = temp_dir.path().join("output_nats.log");
-    let output_amqp_path = temp_dir.path().join("output_amqp.log");
-    let output_mqtt_path = temp_dir.path().join("output_mqtt.log");
+    let output_path = temp_dir.path().join(format!("output_{}.log", broker_name.to_lowercase()));
 
     // Generate a test file with unique messages
     let num_messages = 5;
@@ -101,68 +108,92 @@ async fn test_end_to_end_routing() {
     // Load config and override file paths
     let settings = config::Config::builder()
         .add_source(ConfigFile::with_name("tests/config.integration").required(true))
-        .set_override("connections.0.file.path", input_path.to_str().unwrap())
-        .unwrap()
+        // Force log level to trace for maximum debugging output during the test
+        .set_override("log_level", "trace").unwrap()
         .set_override(
-            "connections.1.file.path",
-            output_kafka_path.to_str().unwrap(),
-        )
-        .unwrap()
+            &format!("routes.{}.source.file.path", file_to_broker_route),
+            input_path.to_str().unwrap(),
+        ).unwrap()
         .set_override(
-            "connections.2.file.path",
-            output_nats_path.to_str().unwrap(),
-        )
-        .unwrap()
-        .set_override(
-            "connections.3.file.path",
-            output_amqp_path.to_str().unwrap(),
-        )
-        .unwrap()
-        .set_override(
-            "connections.4.file.path",
-            output_mqtt_path.to_str().unwrap(),
-        )
-        .unwrap()
+            &format!("routes.{}.sink.file.path", broker_to_file_route),
+            output_path.to_str().unwrap(),
+        ).unwrap()
         .build()
         .unwrap();
 
     let test_config: AppConfig = settings.try_deserialize().unwrap();
 
+    // --- DIAGNOSTIC STEP 1: Print the configuration being used ---
+    // This ensures that the file path overrides are correctly applied.
+    println!("--- Using Test Configuration for {} ---", broker_name);
+    println!("{:#?}", test_config);
+    println!("------------------------------------");
+
     // Run the bridge in a separate task
     let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
     bridge.initialize_from_config().await.unwrap();
 
+    // --- DIAGNOSTIC STEP 2: Assert that the bridge tasks were created ---
+    let mut input = String::new();
+    File::open(&input_path).unwrap().read_to_string(&mut input).unwrap();
+    dbg!(&input);
+
+    // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
+    
     let bridge_task = tokio::spawn(bridge.run());
 
     // Give the bridge time to process all messages.
     // The file source will error on EOF, and the bridge will log it and continue.
     // This is a simple way to wait for completion in this test setup.
     tokio::time::sleep(Duration::from_secs(20)).await;
+    File::open(&output_path).unwrap().read_to_string(&mut input).unwrap();
+    dbg!(&input);
 
     // The bridge task should have finished or be idle. We can drop the shutdown receiver.
     drop(bridge_task);
 
-    // Verify the output files
-    let output_paths = [
-        ("Kafka", &output_kafka_path),
-        ("NATS", &output_nats_path),
-        ("AMQP", &output_amqp_path),
-        ("MQTT", &output_mqtt_path),
-    ];
+    // Verify the output file
+    let received_ids = read_output_file(&output_path);
+    assert_eq!(
+        received_ids.len(),
+        num_messages,
+        "TEST FAILED for [{}]: Expected {} messages, but found {}. The output file might be missing or empty.",
+        broker_name,
+        num_messages,
+        received_ids.len(),
+    );
+    assert_eq!(
+        sent_message_ids, received_ids,
+        "TEST FAILED for [{}]: The set of received message IDs does not match the set of sent message IDs.",
+        broker_name,
+    );
+    println!("Successfully verified {} route!", broker_name);
+}
 
-    for (name, path) in &output_paths {
-        let received_ids = read_output_file(path);
-        assert_eq!(
-            received_ids.len(),
-            num_messages,
-            "Mismatch in message count for {}",
-            name
-        );
-        assert_eq!(
-            sent_message_ids, received_ids,
-            "Mismatch in message content for {}",
-            name
-        );
-        println!("Successfully verified {} route!", name);
-    }
+#[tokio::test]
+#[ignore]
+async fn test_kafka_pipeline() {
+    let _docker_guard = DockerCompose::up();
+    run_pipeline_test("Kafka", "file_to_kafka", "kafka_to_file").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nats_pipeline() {
+    let _docker_guard = DockerCompose::up();
+    run_pipeline_test("NATS", "file_to_nats", "nats_to_file").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_amqp_pipeline() {
+    let _docker_guard = DockerCompose::up();
+    run_pipeline_test("AMQP", "file_to_amqp", "amqp_to_file").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_mqtt_pipeline() {
+    let _docker_guard = DockerCompose::up();
+    run_pipeline_test("MQTT", "file_to_mqtt", "mqtt_to_file").await;
 }

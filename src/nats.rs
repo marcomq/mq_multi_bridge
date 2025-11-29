@@ -3,7 +3,7 @@ use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
-use async_nats::{jetstream, Client, ConnectOptions};
+use async_nats::{jetstream, Client, ConnectOptions, jetstream::stream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -24,6 +24,20 @@ impl NatsSink {
     pub async fn new(config: &NatsConfig, subject: &str) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
+        let jetstream = jetstream::new(client.clone());
+
+        // Ensure the stream exists. This is idempotent.
+        // The stream name is taken from the default_stream in the config, which is what the source will use.
+        if let Some(stream_name) = &config.default_stream {
+            info!(stream = %stream_name, "Ensuring NATS stream exists");
+            jetstream.get_or_create_stream(stream::Config {
+                name: stream_name.clone(),
+                subjects: vec![format!("{}*", subject.trim_end_matches(".*"))], // Capture this subject and any sub-subjects
+                ..Default::default()
+            }).await?;
+        } else {
+            info!("No default_stream configured for NATS sink, skipping stream creation. This may not work with a JetStream source.");
+        }
 
         Ok(Self {
             client,

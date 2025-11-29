@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: confluentinc/cp-kafka:7.3.2
+    image: confluentinc/cp-kafka:7.9.5
     container_name: kafka-itest-mq-multi-bridge
     ports:
       - "9092:9092"
@@ -26,21 +26,21 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
 
   rabbitmq:
-    image: rabbitmq:3.11-management
+    image: rabbitmq:4.1.6-management-alpine
     container_name: rabbitmq-itest-mq-multi-bridge
     ports:
       - "5672:5672"
       - "15672:15672" # Management UI
 
   nats:
-    image: nats:2.9-alpine
+    image: nats:2.12.2-alpine3.22
     container_name: nats-itest-mq-multi-bridge
     command: "-js" # Enable JetStream
     ports:
       - "4222:4222"
 
   mosquitto:
-    image: eclipse-mosquitto:2.0
+    image: eclipse-mosquitto:2.0.22
     container_name: mosquitto-itest-mq-multi-bridge
     ports:
       - "1883:1883"
