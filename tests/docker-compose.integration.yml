@@ -1,0 +1,46 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: kafka-itest-mq-multi-bridge
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft settings
+      KAFKA_BROKER_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      # Use a fixed cluster ID for the test environment
+      CLUSTER_ID: 'ci-cluster-id-for-mq-multi-bridge-12345'
+
+      # Listener settings
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      # Other settings
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: rabbitmq-itest-mq-multi-bridge
+    ports:
+      - "5672:5672"
+      - "15672:15672" # Management UI
+
+  nats:
+    image: nats:2.9-alpine
+    container_name: nats-itest-mq-multi-bridge
+    command: "-js" # Enable JetStream
+    ports:
+      - "4222:4222"
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto-itest-mq-multi-bridge
+    ports:
+      - "1883:1883"

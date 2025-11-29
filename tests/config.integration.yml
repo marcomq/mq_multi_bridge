@@ -1,0 +1,90 @@
+log_level: "info"
+sled_path: "/tmp/integration_test_db"
+dedup_ttl_seconds: 60
+
+connections:
+  - name: "file_in"
+    file:
+      path: "/tmp/input.log"
+  - name: "file_out_kafka"
+    file:
+      path: "/tmp/output_kafka.log"
+  - name: "file_out_nats"
+    file:
+      path: "/tmp/output_nats.log"
+  - name: "file_out_amqp"
+    file:
+      path: "/tmp/output_amqp.log"
+  - name: "file_out_mqtt"
+    file:
+      path: "/tmp/output_mqtt.log"
+
+  - name: "kafka_test"
+    kafka:
+      brokers: "localhost:9092"
+      group_id: "integration_test_group"
+  - name: "nats_test"
+    nats:
+      url: "nats://localhost:4222"
+      default_stream: "test-stream"
+  - name: "amqp_test"
+    amqp:
+      url: "amqp://guest:guest@localhost:5672/%2f"
+  - name: "mqtt_test"
+    mqtt:
+      url: "mqtt://localhost:1883"
+
+routes:
+  # Kafka Route
+  - name: "file_to_kafka"
+    source:
+      connection: "file_in"
+      file: {}
+    sink:
+      connection: "kafka_test"
+      kafka:
+        topic: "test_topic_kafka"
+  - name: "kafka_to_file"
+    source:
+      connection: "kafka_test"
+      kafka:
+        topic: "test_topic_kafka"
+    sink:
+      connection: "file_out_kafka"
+      file: {}
+
+  # NATS Route
+  - name: "file_to_nats"
+    source:
+      connection: "file_in"
+      file: {}
+    sink:
+      connection: "nats_test"
+      nats:
+        subject: "test_subject_nats"
+  - name: "nats_to_file"
+    source:
+      connection: "nats_test"
+      nats:
+        subject: "test_subject_nats"
+        stream: "test-stream"
+    sink:
+      connection: "file_out_nats"
+      file: {}
+
+  # AMQP/RabbitMQ Route (Note: AMQP source/sink will use the route name as queue name by default)
+  - name: "file_to_amqp"
+    source: { connection: "file_in", file: {} }
+    sink: { connection: "amqp_test", amqp: { queue: "test_queue_amqp" } }
+  - name: "amqp_to_file"
+    source: { connection: "amqp_test", amqp: { queue: "test_queue_amqp" } }
+    sink: { connection: "file_out_amqp", file: {} }
+
+  # MQTT Route
+  - name: "file_to_mqtt"
+    source: { connection: "file_in", file: {} }
+    sink: { connection: "mqtt_test", mqtt: { topic: "test_topic_mqtt" } }
+  - name: "mqtt_to_file"
+    source: { connection: "mqtt_test", mqtt: { topic: "test_topic_mqtt" } }
+    sink: { connection: "file_out_mqtt", file: {} }
+

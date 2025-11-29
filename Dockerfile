@@ -1,5 +1,5 @@
 # --- Builder Stage ---
-FROM rust:1.90-bookworm as builder
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /usr/src/mq_multi_bridge
 
@@ -16,7 +16,7 @@ RUN cargo build --release
 RUN strip /usr/src/mq_multi_bridge/target/release/mq_multi_bridge
 
 # --- Final Stage ---
-FROM gcr.io/distroless/cc-debian12 as final
+FROM gcr.io/distroless/cc-debian12 AS final
 
 # Copy the built binary from the builder stage
 COPY --from=builder /usr/src/mq_multi_bridge/target/release/mq_multi_bridge /usr/local/bin/mq_multi_bridge
