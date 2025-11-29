@@ -57,44 +57,22 @@ impl MessageSink for NatsSink {
 
 pub struct NatsSource {
     jetstream: jetstream::Context,
-    stream_name: String,
-    // The subscription is now optional, as it's created when a subject is specified.
-    subscription: Arc<Mutex<Option<jetstream::consumer::pull::Stream>>>,
+    subscription: Arc<Mutex<jetstream::consumer::pull::Stream>>,
 }
 use std::any::Any;
 
 impl NatsSource {
-    pub async fn new(config: &NatsConfig, stream_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: &NatsConfig,
+        stream_name: &str,
+        subject: &str,
+    ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
-        if !stream_name.is_empty() {
-            // Check if the stream exists, but don't create a consumer yet.
-            let _stream = jetstream.get_stream(stream_name).await?;
-            info!(stream = %stream_name, "NATS source connection established");
-        }
-
-        Ok(Self {
-            jetstream,
-            stream_name: stream_name.to_string(),
-            subscription: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    pub async fn with_subject_and_stream(
-        &self,
-        subject: &str,
-        stream_override: &Option<String>,
-        conn_config: &NatsConfig,
-    ) -> anyhow::Result<Self> {
-        let stream_name = stream_override
-            .as_deref()
-            .or(conn_config.default_stream.as_deref())
-            .ok_or_else(|| anyhow!("NATS route for subject '{}' must have a 'stream' or the connection must have a 'default_stream'", subject))?;
-
         // Create a new consumer specifically for the given subject.
-        let stream = self.jetstream.get_stream(stream_name).await?;
+        let stream = jetstream.get_stream(stream_name).await?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject
@@ -113,9 +91,8 @@ impl NatsSource {
         info!(stream = %stream_name, subject = %subject, "NATS source subscribed to subject");
 
         Ok(Self {
-            jetstream: self.jetstream.clone(),
-            stream_name: stream_name.to_string(),
-            subscription: Arc::new(Mutex::new(Some(subscription))),
+            jetstream,
+            subscription: Arc::new(Mutex::new(subscription)),
         })
     }
 }
@@ -125,8 +102,6 @@ impl MessageSource for NatsSource {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut sub = self.subscription.lock().await;
         let message = sub
-            .as_mut()
-            .ok_or_else(|| anyhow!("NATS source is not subscribed to a subject"))?
             .next()
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
@@ -155,7 +130,6 @@ impl Clone for NatsSource {
     fn clone(&self) -> Self {
         Self {
             jetstream: self.jetstream.clone(),
-            stream_name: self.stream_name.clone(),
             subscription: self.subscription.clone(),
         }
     }

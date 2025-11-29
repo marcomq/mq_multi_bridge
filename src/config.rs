@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KafkaConfig {
     pub brokers: String,
     pub group_id: String,
@@ -11,7 +11,7 @@ pub struct KafkaConfig {
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TlsConfig {
     #[serde(default)]
     pub required: bool,
@@ -23,7 +23,7 @@ pub struct TlsConfig {
     pub accept_invalid_certs: bool,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct NatsConfig {
     pub url: String,
     pub default_stream: Option<String>,
@@ -31,26 +31,26 @@ pub struct NatsConfig {
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AmqpConfig {
     pub url: String,
     #[serde(flatten, default)]
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct MqttConfig {
     pub url: String,
     #[serde(flatten, default)]
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct FileConfig {
     pub path: String,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct HttpConfig {
     pub listen_address: Option<String>,
     pub url: Option<String>,
@@ -121,7 +121,7 @@ pub struct StaticResponseEndpoint {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub struct SourceEndpoint {
-    pub connection: String,
+    // pub connection: String,
     #[serde(flatten)]
     pub endpoint_type: SourceEndpointType,
 }
@@ -129,18 +129,18 @@ pub struct SourceEndpoint {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceEndpointType {
-    Kafka(KafkaEndpoint),
-    Nats(NatsEndpoint),
-    Amqp(AmqpEndpoint),
-    Mqtt(MqttEndpoint),
-    File(FileEndpoint),
-    Http(HttpEndpoint),
+    Kafka(KafkaSourceEndpoint),
+    Nats(NatsSourceEndpoint),
+    Amqp(AmqpSourceEndpoint),
+    Mqtt(MqttSourceEndpoint),
+    File(FileSourceEndpoint),
+    Http(HttpSourceEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub struct SinkEndpoint {
-    pub connection: String,
+    // pub connection: String,
     #[serde(flatten)]
     pub endpoint_type: SinkEndpointType,
 }
@@ -170,21 +170,14 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Connection {
-    pub name: String,
-    #[serde(flatten)]
-    pub connection_type: ConnectionType,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum SinkEndpointType {
-    Kafka(KafkaEndpoint),
-    Nats(NatsEndpoint),
-    Amqp(AmqpEndpoint),
-    Mqtt(MqttEndpoint),
-    File(FileEndpoint),
-    Http(HttpEndpoint),
+    Kafka(KafkaSinkEndpoint),
+    Nats(NatsSinkEndpoint),
+    Amqp(AmqpSinkEndpoint),
+    Mqtt(MqttSinkEndpoint),
+    File(FileSinkEndpoint),
+    Http(HttpSinkEndpoint),
     StaticResponse(StaticResponseEndpoint),
 }
 
@@ -193,6 +186,7 @@ pub struct Route {
     pub name: String,
     pub source: SourceEndpoint,
     pub sink: SinkEndpoint,
+    pub dlq: Option<DlqConfig>,
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
@@ -208,11 +202,106 @@ pub struct Config {
     pub dedup_ttl_seconds: u64,
     #[serde(default)]
     pub metrics: MetricsConfig,
-    #[serde(default)]
-    pub connections: Vec<Connection>,
-    pub dlq: Option<DlqConfig>,
+    // #[serde(default)]
+    // pub connections: Vec<Connection>,
     #[serde(default)]
     pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct KafkaSourceEndpoint {
+    #[serde(flatten)]
+    pub config: KafkaConfig,
+    #[serde(flatten)]
+    pub endpoint: KafkaEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct NatsSourceEndpoint {
+    #[serde(flatten)]
+    pub config: NatsConfig,
+    #[serde(flatten)]
+    pub endpoint: NatsEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct AmqpSourceEndpoint {
+    #[serde(flatten)]
+    pub config: AmqpConfig,
+    #[serde(flatten)]
+    pub endpoint: AmqpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MqttSourceEndpoint {
+    #[serde(flatten)]
+    pub config: MqttConfig,
+    #[serde(flatten)]
+    pub endpoint: MqttEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct FileSourceEndpoint {
+    #[serde(flatten)]
+    pub config: FileConfig,
+    #[serde(flatten)]
+    pub endpoint: FileEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct HttpSourceEndpoint {
+    #[serde(flatten)]
+    pub config: HttpConfig,
+    #[serde(flatten)]
+    pub endpoint: HttpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct KafkaSinkEndpoint {
+    #[serde(flatten)]
+    pub config: KafkaConfig,
+    #[serde(flatten)]
+    pub endpoint: KafkaEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NatsSinkEndpoint {
+    #[serde(flatten)]
+    pub config: NatsConfig,
+    #[serde(flatten)]
+    pub endpoint: NatsEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AmqpSinkEndpoint {
+    #[serde(flatten)]
+    pub config: AmqpConfig,
+    #[serde(flatten)]
+    pub endpoint: AmqpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MqttSinkEndpoint {
+    #[serde(flatten)]
+    pub config: MqttConfig,
+    #[serde(flatten)]
+    pub endpoint: MqttEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FileSinkEndpoint {
+    #[serde(flatten)]
+    pub config: FileConfig,
+    #[serde(flatten)]
+    pub endpoint: FileEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HttpSinkEndpoint {
+    #[serde(flatten)]
+    pub config: HttpConfig,
+    #[serde(flatten)]
+    pub endpoint: HttpEndpoint,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -237,8 +326,9 @@ pub struct DlqKafkaEndpoint {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DlqConfig {
-    pub connection: String,
-    pub kafka: DlqKafkaEndpoint,
+    // pub connection: String,
+    #[serde(flatten)]
+    pub kafka: KafkaSinkEndpoint,
 }
 
 #[allow(unused_imports)]
@@ -256,61 +346,37 @@ metrics:
   enabled: true
   listen_address: "0.0.0.0:9191"
 
-connections:
-  - name: "kafka_main"
-    kafka:
-      brokers: "kafka:9092"
-      group_id: "bridge_group"
-  - name: "nats_main"
-    nats:
-      url: "nats://nats:4222"
-  - name: "output_log"
-    file:
-      path: "/tmp/output.log"
-  - name: "http_server"
-    http:
-      listen_address: "0.0.0.0:8080"
-
-dlq:
-  connection: "kafka_main"
-  # The topic must be nested under the endpoint type, 'kafka' in this case.
-  kafka:
-    topic: "my_dlq"
-
 routes:
   - name: "kafka_to_nats"
     source:
-      connection: "kafka_main"
       kafka:
+        brokers: "kafka:9092"
+        group_id: "bridge_group"
         topic: "in_topic"
     sink:
-      connection: "nats_main"
       nats:
+        url: "nats://nats:4222"
         subject: "out_subject"
+    dlq:
+      brokers: "kafka:9092"
+      group_id: "bridge_group_dlq"
+      topic: "my_dlq"
 "#;
 
         let config: Result<Config, _> = serde_yaml::from_str(yaml_config);
+        dbg!(&config);
         assert!(config.is_ok());
         let config = config.unwrap();
 
         assert_eq!(config.log_level, "debug");
-        assert_eq!(config.connections.len(), 4);
         assert_eq!(config.routes.len(), 1);
-        assert!(config.dlq.is_some());
-
-        let kafka_conn = config
-            .connections
-            .iter()
-            .find(|c| c.name == "kafka_main")
-            .unwrap();
-        if let ConnectionType::Kafka(kafka_config) = &kafka_conn.connection_type {
-            assert_eq!(kafka_config.brokers, "kafka:9092");
-        } else {
-            panic!("Expected Kafka connection");
-        }
 
         let route = &config.routes[0];
         assert_eq!(route.name, "kafka_to_nats");
-        assert_eq!(route.source.connection, "kafka_main");
+        assert!(route.dlq.is_some());
+        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+            assert_eq!(k.config.brokers, "kafka:9092");
+            assert_eq!(k.endpoint.topic.as_deref(), Some("in_topic"));
+        }
     }
 }

@@ -15,14 +15,14 @@ pub mod sinks;
 pub mod sources;
 pub mod static_response;
 pub mod store;
-use std::collections::HashMap;
-use std::collections::HashSet;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpEndpoint, Config, ConnectionType, FileConfig, FileEndpoint, HttpConfig,
-    HttpEndpoint, KafkaConfig, KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint, StaticResponseEndpoint,
-    SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType,
+    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, FileConfig, FileSinkEndpoint,
+    FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig,
+    KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, Route,
+    NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, SinkEndpoint, SinkEndpointType,
+    SourceEndpoint, SourceEndpointType, StaticResponseEndpoint,
 };
 use crate::file::{FileSink, FileSource};
 use crate::http::{HttpSink, HttpSource};
@@ -34,7 +34,7 @@ use crate::static_response::StaticResponseSink;
 use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use metrics::{counter, histogram};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,10 +43,7 @@ use tracing::{error, info, instrument, warn};
 
 pub struct Bridge {
     config: Config,
-    sources: HashMap<String, Arc<dyn MessageSource>>,
-    sinks: HashMap<String, Arc<dyn MessageSink>>,
     dedup_store: Arc<DeduplicationStore>,
-    dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
     bridge_tasks: Vec<tokio::task::JoinHandle<()>>, // The task itself returns (), JoinHandle wraps it in a Result for panics
     shutdown_rx: tokio::sync::watch::Receiver<()>,
 }
@@ -64,10 +61,7 @@ impl Bridge {
 
         let bridge = Self {
             config,
-            sources: HashMap::new(),
-            sinks: HashMap::new(),
             dedup_store,
-            dlq_sink: None,
             bridge_tasks: Vec::new(),
             shutdown_rx,
         };
@@ -75,34 +69,23 @@ impl Bridge {
         Ok(bridge)
     }
 
-    /// Adds a custom source to the bridge.
-    pub fn add_source(&mut self, name: &str, source: Arc<dyn MessageSource>) {
-        self.sources.insert(name.to_string(), source);
-    }
-
-    /// Adds a custom sink to the bridge.
-    pub fn add_sink(&mut self, name: &str, sink: Arc<dyn MessageSink>) {
-        self.sinks.insert(name.to_string(), sink);
-    }
-
     /// Adds a route to the bridge, connecting a source to a sink.
-    pub async fn add_route(
-        &mut self,
-        route_name: &str,
-        source_endpoint: &SourceEndpoint,
-        sink_endpoint: &SinkEndpoint,
-    ) -> Result<()> {
-        let source = self
-            .get_or_create_source(route_name, source_endpoint)
-            .await?;
-        let sink = self.get_or_create_sink(route_name, sink_endpoint).await?;
+    pub async fn add_route(&mut self, route: &Route) -> Result<()> {
+        let source = create_source_from_route(&route.name, &route.source).await?;
+        let sink = create_sink_from_route(&route.name, &route.sink).await?;
+        let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
+            let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
+            Some(create_kafka_sink(&dlq_config.kafka.config, topic).await?)
+        } else {
+            None
+        };
 
         let bridge_task = run_bridge_instance(
-            route_name.to_string(),
+            route.name.clone(),
             source,
             sink,
             self.dedup_store.clone(),
-            self.dlq_sink.clone(),
+            dlq_sink,
             self.shutdown_rx.clone(),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
@@ -111,13 +94,8 @@ impl Bridge {
 
     /// Initializes all connections and routes from the configuration.
     pub async fn initialize_from_config(&mut self) -> Result<()> {
-        self.validate_connections()?;
-        self.initialize_dlq().await?;
         for route in self.config.routes.clone() {
-            match self
-                .add_route(&route.name, &route.source, &route.sink)
-                .await
-            {
+            match self.add_route(&route).await {
                 Ok(_) => (),
                 Err(e) => {
                     // Log the error and continue with other routes.
@@ -135,304 +113,72 @@ impl Bridge {
         futures::future::join_all(self.bridge_tasks).await;
         Ok(())
     }
-
-    /// Initializes the DLQ sink if configured.
-    async fn initialize_dlq(&mut self) -> Result<()> {
-        if let Some(dlq_config) = &self.config.dlq {
-            let dlq_conn_sink = self.sinks.get(&dlq_config.connection).with_context(|| {
-                format!(
-                    "DLQ connection '{}' not found in defined connections",
-                    dlq_config.connection
-                )
-            })?;
-            let kafka_sink = dlq_conn_sink
-                .as_any()
-                .downcast_ref::<KafkaSink>()
-                .ok_or_else(|| anyhow!("DLQ connection must be of type Kafka"))?;
-            self.dlq_sink = Some(Arc::new(kafka_sink.with_topic(&dlq_config.kafka.topic)));
-        }
-        Ok(())
-    }
-
-    /// Creates and stores all connections defined in the config.
-    fn validate_connections(&mut self) -> Result<()> {
-        info!(config = ?self.config, "Initializing Bridge Library");
-
-        // --- Validate connection names before any I/O ---
-        let mut connection_names = HashSet::new();
-        for conn in &self.config.connections {
-            if !connection_names.insert(conn.name.clone()) {
-                return Err(anyhow!("Duplicate connection name found: {}", conn.name));
-            }
-        }
-        Ok(())
-    }
-
-    async fn get_or_create_source(
-        &mut self,
-        route_name: &str,
-        endpoint: &SourceEndpoint,
-    ) -> Result<Arc<dyn MessageSource + Send + Sync>> {
-        if let Some(source) = self.sources.get(&endpoint.connection) {
-            return create_source_from_route(&self.config, route_name, source, endpoint).await;
-        }
-
-        let conn = self
-            .config
-            .connections
-            .iter()
-            .find(|c| c.name == endpoint.connection)
-            .with_context(|| {
-                format!(
-                    "[route:{}] Source connection '{}' not found in defined connections",
-                    route_name, endpoint.connection
-                )
-            })?;
-
-        let source: Arc<dyn MessageSource> = match &conn.connection_type {
-            ConnectionType::Kafka(cfg) => create_kafka_source(cfg, "").await?,
-            ConnectionType::Nats(cfg) => create_nats_source(cfg, "").await?,
-            ConnectionType::Amqp(cfg) => create_amqp_source(cfg, "").await?,
-            ConnectionType::Mqtt(cfg) => create_mqtt_source(cfg, "").await?,
-            ConnectionType::File(cfg) => create_file_source(cfg).await?,
-            ConnectionType::Http(cfg) => create_http_source(cfg).await?,
-            ConnectionType::StaticResponse(_) => {
-                return Err(anyhow!("[route:{}] Connection '{}' of type 'StaticResponse' cannot be used as a source", route_name, conn.name));
-            }
-        };
-
-        self.sources
-            .insert(endpoint.connection.clone(), source.clone());
-
-        create_source_from_route(&self.config, route_name, &source, endpoint).await
-    }
-
-    async fn get_or_create_sink(
-        &mut self,
-        route_name: &str,
-        endpoint: &SinkEndpoint,
-    ) -> Result<Arc<dyn MessageSink + Send + Sync>> {
-        if let Some(sink) = self.sinks.get(&endpoint.connection) {
-            return create_sink_from_route(route_name, sink, endpoint).await;
-        }
-
-        let conn = self
-            .config
-            .connections
-            .iter()
-            .find(|c| c.name == endpoint.connection)
-            .with_context(|| {
-                format!(
-                    "[route:{}] Sink connection '{}' not found in defined connections",
-                    route_name, endpoint.connection
-                )
-            })?;
-
-        let sink: Arc<dyn MessageSink> = match &conn.connection_type {
-            ConnectionType::Kafka(cfg) => create_kafka_sink(cfg, "").await?,
-            ConnectionType::Nats(cfg) => create_nats_sink(cfg, "").await?,
-            ConnectionType::Amqp(cfg) => create_amqp_sink(cfg).await?,
-            ConnectionType::Mqtt(cfg) => create_mqtt_sink(cfg, "").await?,
-            ConnectionType::File(cfg) => create_file_sink(cfg).await?,
-            ConnectionType::Http(cfg) => create_http_sink(cfg).await?,
-            ConnectionType::StaticResponse(cfg) => create_static_response_sink(cfg).await?,
-        };
-
-        self.sinks.insert(endpoint.connection.clone(), sink.clone());
-
-        create_sink_from_route(route_name, &sink, endpoint).await
-    }
 }
 
 async fn create_source_from_route(
-    config: &Config,
     route_name: &str,
-    conn_source: &Arc<dyn MessageSource>,
     endpoint: &SourceEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     match &endpoint.endpoint_type {
-        SourceEndpointType::Kafka(KafkaEndpoint { topic }) => {
-            let kafka_source = conn_source
-                .as_any()
-                .downcast_ref::<crate::kafka::KafkaSource>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a Kafka source", endpoint.connection)
-                })?;
-            let topic = topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(kafka_source.with_topic(topic).await?))
+        SourceEndpointType::Kafka(KafkaSourceEndpoint { config, endpoint }) => {
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_kafka_source(config, topic).await
         }
-        SourceEndpointType::Nats(NatsEndpoint { subject, stream }) => {
-            // Get the base NATS connection config
-            let conn_config = config
-                .connections
-                .iter()
-                .find(|c| c.name == endpoint.connection)
-                .and_then(|c| match &c.connection_type {
-                    ConnectionType::Nats(nc) => Some(nc),
-                    _ => None,
-                })
-                .ok_or_else(|| anyhow!("[route:{}] NATS connection '{}' not found or is not a NATS connection type", route_name, endpoint.connection))?;
-
-            let nats_source = conn_source
-                .as_any()
-                .downcast_ref::<NatsSource>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not a NATS source",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-
-            let subject = subject.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(
-                nats_source
-                    .with_subject_and_stream(subject, stream, conn_config)
-                    .await?,
-            ))
+        SourceEndpointType::Nats(NatsSourceEndpoint { config, endpoint }) => {
+            let subject = endpoint.subject.as_deref().unwrap_or(route_name);
+            let stream_name = endpoint
+                .stream
+                .as_deref()
+                .or(config.default_stream.as_deref())
+                .ok_or_else(|| anyhow!("[route:{}] NATS source must specify a 'stream' or have a 'default_stream' in its connection", route_name))?;
+            create_nats_source(config, stream_name, subject).await
         }
-        SourceEndpointType::Amqp(AmqpEndpoint { queue }) => {
-            let amqp_source = conn_source
-                .as_any()
-                .downcast_ref::<AmqpSource>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not an AMQP source",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let queue = queue.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(amqp_source.with_queue(queue).await?))
+        SourceEndpointType::Amqp(AmqpSourceEndpoint { config, endpoint }) => {
+            let queue = endpoint.queue.as_deref().unwrap_or(route_name);
+            create_amqp_source(config, queue).await
         }
-        SourceEndpointType::Mqtt(MqttEndpoint { topic }) => {
-            let mqtt_source = conn_source
-                .as_any()
-                .downcast_ref::<MqttSource>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not an MQTT source",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let topic = topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(mqtt_source.with_topic(topic).await?))
+        SourceEndpointType::Mqtt(MqttSourceEndpoint { config, endpoint }) => {
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_mqtt_source(config, topic).await
         }
-        SourceEndpointType::File(FileEndpoint {}) => {
-            let file_source = conn_source
-                .as_any()
-                .downcast_ref::<FileSource>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a File source", endpoint.connection)
-                })?;
-            Ok(Arc::new(file_source.clone())) // FileSource can be cloned
+        SourceEndpointType::File(FileSourceEndpoint { config, .. }) => {
+            create_file_source(config).await
         }
-        SourceEndpointType::Http(HttpEndpoint { .. }) => {
-            let http_source = conn_source
-                .as_any()
-                .downcast_ref::<HttpSource>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a Http source", endpoint.connection)
-                })?;
-            Ok(Arc::new(http_source.clone()))
-        }
-        // StaticResponse is not a valid source type.
+        SourceEndpointType::Http(HttpSourceEndpoint { config, .. }) => create_http_source(config).await,
     }
 }
 
 async fn create_sink_from_route(
     route_name: &str,
-    conn_sink: &Arc<dyn MessageSink>,
     endpoint: &SinkEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     match &endpoint.endpoint_type {
-        SinkEndpointType::Kafka(KafkaEndpoint { topic }) => {
-            let kafka_sink = conn_sink
-                .as_any()
-                .downcast_ref::<KafkaSink>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not a Kafka sink",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let topic = topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(kafka_sink.with_topic(topic)))
+        SinkEndpointType::Kafka(KafkaSinkEndpoint { config, endpoint }) => {
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_kafka_sink(config, topic).await
         }
-        SinkEndpointType::Nats(NatsEndpoint { subject, stream: _ }) => {
-            // Stream is not needed for sink
-            let nats_sink = conn_sink
-                .as_any()
-                .downcast_ref::<NatsSink>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not a NATS sink",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let subject = subject.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(nats_sink.with_subject(subject)))
+        SinkEndpointType::Nats(NatsSinkEndpoint { config, endpoint }) => {
+            let subject = endpoint.subject.as_deref().unwrap_or(route_name);
+            create_nats_sink(config, subject).await
         }
-        SinkEndpointType::Amqp(AmqpEndpoint { queue }) => {
-            let amqp_sink = conn_sink
-                .as_any()
-                .downcast_ref::<AmqpSink>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not an AMQP sink",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let queue = queue.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(amqp_sink.with_routing_key(queue)))
+        SinkEndpointType::Amqp(AmqpSinkEndpoint { config, endpoint }) => {
+            let queue = endpoint.queue.as_deref().unwrap_or(route_name);
+            create_amqp_sink(config, queue).await
         }
-        SinkEndpointType::Mqtt(MqttEndpoint { topic }) => {
-            let mqtt_sink = conn_sink
-                .as_any()
-                .downcast_ref::<MqttSink>()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] Connection '{}' is not an MQTT sink",
-                        route_name,
-                        endpoint.connection
-                    )
-                })?;
-            let topic = topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(mqtt_sink.with_topic(topic)))
+        SinkEndpointType::Mqtt(MqttSinkEndpoint { config, endpoint }) => {
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_mqtt_sink(config, topic).await
         }
-        SinkEndpointType::File(FileEndpoint {}) => {
-            let file_sink = conn_sink
-                .as_any()
-                .downcast_ref::<FileSink>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a File sink", endpoint.connection)
-                })?;
-            Ok(Arc::new(file_sink.clone())) // FileSink can be cloned
+        SinkEndpointType::File(FileSinkEndpoint { config, .. }) => create_file_sink(config).await,
+        SinkEndpointType::Http(HttpSinkEndpoint { config, endpoint }) => {
+            let mut sink = HttpSink::new(config).await?;
+            if let Some(url) = &endpoint.url {
+                sink = sink.with_url(url);
+            }
+            Ok(Arc::new(sink))
         }
-        SinkEndpointType::Http(HttpEndpoint { url }) => {
-            let http_sink = conn_sink
-                .as_any()
-                .downcast_ref::<HttpSink>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a Http sink", endpoint.connection)
-                })?;
-            Ok(Arc::new(
-                http_sink.with_url(url.as_deref().unwrap_or_default()),
-            ))
-        }
-        SinkEndpointType::StaticResponse(StaticResponseEndpoint { .. }) => {
-            let static_sink = conn_sink
-                .as_any()
-                .downcast_ref::<StaticResponseSink>()
-                .ok_or_else(|| {
-                    anyhow!("Connection '{}' is not a StaticResponse sink", endpoint.connection)
-                })?;
-            // StaticResponseSink doesn't have route-specific properties, so we just clone it.
-            Ok(Arc::new(static_sink.clone()))
+        SinkEndpointType::StaticResponse(config) => {
+            create_static_response_sink(config).await
         }
     }
 }
@@ -451,9 +197,10 @@ async fn create_kafka_sink(
 }
 async fn create_nats_source(
     config: &NatsConfig,
-    stream: &str,
+    stream_name: &str,
+    subject: &str,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(NatsSource::new(config, stream).await?))
+    Ok(Arc::new(NatsSource::new(config, stream_name, subject).await?))
 }
 async fn create_nats_sink(
     config: &NatsConfig,
@@ -469,8 +216,9 @@ async fn create_amqp_source(
 }
 async fn create_amqp_sink(
     config: &AmqpConfig,
+    routing_key: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(AmqpSink::new(config).await?))
+    Ok(Arc::new(AmqpSink::new(config, routing_key).await?))
 }
 async fn create_mqtt_source(
     config: &MqttConfig,
@@ -498,11 +246,6 @@ async fn create_http_source(
     config: &HttpConfig,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     Ok(Arc::new(HttpSource::new(config).await?))
-}
-async fn create_http_sink(
-    config: &HttpConfig,
-) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(HttpSink::new(config).await?))
 }
 async fn create_static_response_sink(
     config: &StaticResponseEndpoint,
@@ -591,61 +334,57 @@ async fn run_bridge_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Connection, DlqConfig, DlqKafkaEndpoint};
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_run_duplicate_connection_name() {
-        let config = Config {
-            log_level: "info".to_string(),
-            sled_path: "/tmp/test_dedup".to_string(),
-            dedup_ttl_seconds: 60,
-            connections: vec![
-                Connection {
-                    name: "conn1".to_string(),
-                    connection_type: ConnectionType::Nats(NatsConfig {
-                        url: "nats://localhost:4222".to_string(),
-                        ..Default::default()
-                    }),
-                },
-                Connection {
-                    name: "conn1".to_string(),
-                    connection_type: ConnectionType::Nats(NatsConfig {
-                        url: "nats://localhost:4223".to_string(),
-                        ..Default::default()
-                    }),
-                },
-            ],
-            ..Default::default()
-        };
-
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-        let mut bridge = Bridge::from_config(config, shutdown_rx).unwrap();
-        let result = bridge.validate_connections();
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap().to_string(),
-            "Duplicate connection name found: conn1"
-        );
-    }
+    use crate::config::{DlqConfig, KafkaSinkEndpoint};
 
     #[test]
     fn test_dlq_config_requires_kafka() {
         let config = Config {
             log_level: "info".to_string(),
             sled_path: "/tmp/test_dedup".to_string(),
-            dedup_ttl_seconds: 60,
-            connections: vec![],
-            dlq: Some(DlqConfig {
-                connection: "kafka_main".to_string(),
-                kafka: DlqKafkaEndpoint {
-                    topic: "my_dlq".to_string(),
+            dedup_ttl_seconds: 60, // connections: vec![],
+            routes: vec![Route {
+                name: "test_route".to_string(),
+                source: SourceEndpoint {
+                    endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
+                        config: FileConfig {
+                            path: "/dev/null".to_string(),
+                        },
+                        endpoint: crate::config::FileEndpoint {},
+                    }),
                 },
-            }),
+                sink: SinkEndpoint {
+                    endpoint_type: SinkEndpointType::File(FileSinkEndpoint {
+                        config: FileConfig {
+                            path: "/dev/null".to_string(),
+                        },
+                        endpoint: crate::config::FileEndpoint {},
+                    }),
+                },
+                dlq: Some(DlqConfig {
+                    kafka: KafkaSinkEndpoint {
+                        config: KafkaConfig {
+                            ..Default::default()
+                        },
+                        endpoint: crate::config::KafkaEndpoint {
+                            topic: Some("my_dlq".to_string()),
+                        },
+                    },
+                }),
+            }],
             ..Default::default()
         };
         // This test primarily checks deserialization logic via the config test.
         // A runtime test would require more mocking. Here we just assert the structure.
-        assert_eq!(config.dlq.as_ref().unwrap().kafka.topic, "my_dlq");
+        assert_eq!(
+            config
+                .routes[0]
+                .dlq
+                .as_ref()
+                .unwrap()
+                .kafka
+                .endpoint
+                .topic,
+            Some("my_dlq".to_string())
+        );
     }
 }

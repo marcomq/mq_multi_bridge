@@ -25,14 +25,14 @@ pub struct AmqpSink {
 }
 
 impl AmqpSink {
-    pub async fn new(config: &AmqpConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: &AmqpConfig, routing_key: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
 
         Ok(Self {
             channel,
             exchange: "".to_string(),    // Default exchange
-            routing_key: "".to_string(), // To be set by the route
+            routing_key: routing_key.to_string(),
         })
     }
 
