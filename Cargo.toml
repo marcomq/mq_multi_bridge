@@ -32,11 +32,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Messaging Clients
-async-nats = "0.35.0"
+async-nats = "0.45"
 rdkafka = { version = "0.38", features = ["tokio"] }
 lapin = { version = "3.7", features = ["rustls"] }
-rumqttc = { version = "0.24" }
-axum = "0.7.5"
+rumqttc = "0.25.1"
+axum = "0.8.7"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
 futures = "0.3.30"
@@ -60,7 +60,7 @@ metrics-exporter-prometheus = "0.18"
 fastrand = "2.1.0"
 
 [dev-dependencies]
-serde_yaml = "0.9"
+serde_yaml = "0.9" # only for testing
 tempfile = "3.10"
 
 [features]
