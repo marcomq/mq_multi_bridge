@@ -2,6 +2,7 @@ use crate::model::CanonicalMessage;
 use async_trait::async_trait;
 use std::error::Error;
 
+pub mod file;
 pub mod kafka;
 pub mod nats;
 

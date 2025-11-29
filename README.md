@@ -8,7 +8,7 @@ Current status is work in progress. Don't use it without testing and fixing.
 ## Features
 
 - **Multiple Broker Support**: Connects Kafka, NATS, AMQP (e.g., RabbitMQ), and MQTT in any direction.
-- **Resilient**: Includes retry logic with exponential backoff and a Dead-Letter Queue (DLQ) for failed messages.
+- **File I/O**: Use local files as a source (reading line-by-line) or a sink (appending messages), perfect for testing and simple logging.
 - **Performant**: Built with Tokio for asynchronous, non-blocking I/O.
 - **Deduplication**: Prevents processing of duplicate messages within a configurable time window when running in single instance mode.
 - **Observable**: Emits logs in JSON format and exposes Prometheus metrics for easy integration with modern monitoring and logging platforms.
@@ -100,6 +100,12 @@ connections:
     mqtt:
       url: "tcp://mqtt.example.com:1883"
       client_id: "bridge-iot-client"
+  - name: "input_file"
+    file:
+      path: "/var/data/input.log"
+  - name: "output_file"
+    file:
+      path: "/var/data/output.log"
 
 # Dead-Letter Queue (DLQ) configuration
 dlq:
@@ -136,6 +142,14 @@ routes:
       connection: "mqtt_iot"
       mqtt:
         topic: "iot/data"
+  - name: "file_to_kafka"
+    source:
+      connection: "input_file"
+      file: {} # No extra config needed for file source
+    sink:
+      connection: "kafka_eu_west"
+      kafka:
+        topic: "from_file"
 ```
 
 ### Environment Variables

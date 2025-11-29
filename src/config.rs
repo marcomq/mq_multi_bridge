@@ -53,6 +53,11 @@ pub struct MqttConfig {
     pub tls: TlsConfig,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct FileConfig {
+    pub path: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionType {
@@ -60,6 +65,7 @@ pub enum ConnectionType {
     Nats(NatsConfig),
     Amqp(AmqpConfig),
     Mqtt(MqttConfig),
+    File(FileConfig),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -84,6 +90,9 @@ pub struct MqttEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct FileEndpoint {}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub struct SourceEndpoint {
     pub connection: String,
@@ -98,6 +107,7 @@ pub enum SourceEndpointType {
     Nats(NatsEndpoint),
     Amqp(AmqpEndpoint),
     Mqtt(MqttEndpoint),
+    File(FileEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -145,6 +155,7 @@ pub enum SinkEndpointType {
     Nats(NatsEndpoint),
     Amqp(AmqpEndpoint),
     Mqtt(MqttEndpoint),
+    File(FileEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -211,6 +222,9 @@ connections:
   - name: "nats_main"
     nats:
       url: "nats://nats:4222"
+  - name: "output_log"
+    file:
+      path: "/tmp/output.log"
 
 dlq:
   connection: "kafka_main"
@@ -235,7 +249,7 @@ routes:
         let config = config.unwrap();
 
         assert_eq!(config.log_level, "debug");
-        assert_eq!(config.connections.len(), 2);
+        assert_eq!(config.connections.len(), 3);
         assert_eq!(config.routes.len(), 1);
         assert!(config.dlq.is_some());
 

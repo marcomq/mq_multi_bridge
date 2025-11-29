@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
 pub mod amqp;
+pub mod file;
 pub mod config;
 pub mod kafka;
 pub mod model;
@@ -17,10 +18,11 @@ use std::collections::HashSet;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpEndpoint, Config, ConnectionType, KafkaConfig, KafkaEndpoint, MqttConfig,
-    MqttEndpoint, NatsConfig, NatsEndpoint, SinkEndpoint,
+    AmqpConfig, AmqpEndpoint, Config, ConnectionType, FileConfig, FileEndpoint, KafkaConfig,
+    KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint, SinkEndpoint,
     SinkEndpointType, SourceEndpoint, SourceEndpointType,
 };
+use crate::file::{FileSink, FileSource};
 use crate::kafka::KafkaSink;
 use crate::mqtt::{MqttSink, MqttSource};
 use crate::nats::NatsSink;
@@ -86,6 +88,12 @@ pub async fn run(
                 let source = create_mqtt_source(mqtt_config, "").await?;
                 sources.insert(conn.name.clone(), source);
                 let sink = create_mqtt_sink(mqtt_config, "").await?;
+                sinks.insert(conn.name.clone(), sink);
+            }
+            ConnectionType::File(file_config) => {
+                let source = create_file_source(file_config).await?;
+                sources.insert(conn.name.clone(), source);
+                let sink = create_file_sink(file_config).await?;
                 sinks.insert(conn.name.clone(), sink);
             }
         }
@@ -187,6 +195,13 @@ async fn create_source_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT source", endpoint.connection))?;
             Ok(Arc::new(mqtt_source.with_topic(topic).await?))
         }
+        SourceEndpointType::File(FileEndpoint {}) => {
+            let file_source = conn_source
+                .as_any()
+                .downcast_ref::<FileSource>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a File source", endpoint.connection))?;
+            Ok(Arc::new(file_source.clone())) // FileSource can be cloned
+        }
     }
 }
 
@@ -227,6 +242,13 @@ async fn create_sink_from_route(
                 .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT sink", endpoint.connection))?;
             Ok(Arc::new(mqtt_sink.with_topic(topic)))
         }
+        SinkEndpointType::File(FileEndpoint {}) => {
+            let file_sink = conn_sink
+                .as_any()
+                .downcast_ref::<FileSink>()
+                .ok_or_else(|| anyhow!("Connection '{}' is not a File sink", endpoint.connection))?;
+            Ok(Arc::new(file_sink.clone())) // FileSink can be cloned
+        }
     }
 }
 
@@ -254,9 +276,12 @@ async fn create_mqtt_source(config: &MqttConfig, topic: &str) -> anyhow::Result<
 async fn create_mqtt_sink(config: &MqttConfig, topic: &str) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     Ok(Arc::new(MqttSink::new(config, topic).await?))
 }
-
-
-
+async fn create_file_source(config: &FileConfig) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
+    Ok(Arc::new(FileSource::new(config).await?))
+}
+async fn create_file_sink(config: &FileConfig) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    Ok(Arc::new(FileSink::new(config).await?))
+}
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]
 async fn run_bridge_instance(
