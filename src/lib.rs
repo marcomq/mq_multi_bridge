@@ -13,6 +13,7 @@ pub mod mqtt;
 pub mod nats;
 pub mod sinks;
 pub mod sources;
+pub mod static_response;
 pub mod store;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -20,7 +21,7 @@ use std::collections::HashSet;
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
     AmqpConfig, AmqpEndpoint, Config, ConnectionType, FileConfig, FileEndpoint, HttpConfig,
-    HttpEndpoint, KafkaConfig, KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint,
+    HttpEndpoint, KafkaConfig, KafkaEndpoint, MqttConfig, MqttEndpoint, NatsConfig, NatsEndpoint, StaticResponseEndpoint,
     SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType,
 };
 use crate::file::{FileSink, FileSource};
@@ -29,6 +30,7 @@ use crate::kafka::KafkaSink;
 use crate::mqtt::{MqttSink, MqttSource};
 use crate::nats::NatsSink;
 use crate::nats::NatsSource;
+use crate::static_response::StaticResponseSink;
 use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
@@ -194,6 +196,9 @@ impl Bridge {
             ConnectionType::Mqtt(cfg) => create_mqtt_source(cfg, "").await?,
             ConnectionType::File(cfg) => create_file_source(cfg).await?,
             ConnectionType::Http(cfg) => create_http_source(cfg).await?,
+            ConnectionType::StaticResponse(_) => {
+                return Err(anyhow!("[route:{}] Connection '{}' of type 'StaticResponse' cannot be used as a source", route_name, conn.name));
+            }
         };
 
         self.sources
@@ -230,6 +235,7 @@ impl Bridge {
             ConnectionType::Mqtt(cfg) => create_mqtt_sink(cfg, "").await?,
             ConnectionType::File(cfg) => create_file_sink(cfg).await?,
             ConnectionType::Http(cfg) => create_http_sink(cfg).await?,
+            ConnectionType::StaticResponse(cfg) => create_static_response_sink(cfg).await?,
         };
 
         self.sinks.insert(endpoint.connection.clone(), sink.clone());
@@ -331,6 +337,7 @@ async fn create_source_from_route(
                 })?;
             Ok(Arc::new(http_source.clone()))
         }
+        // StaticResponse is not a valid source type.
     }
 }
 
@@ -417,6 +424,16 @@ async fn create_sink_from_route(
                 http_sink.with_url(url.as_deref().unwrap_or_default()),
             ))
         }
+        SinkEndpointType::StaticResponse(StaticResponseEndpoint { .. }) => {
+            let static_sink = conn_sink
+                .as_any()
+                .downcast_ref::<StaticResponseSink>()
+                .ok_or_else(|| {
+                    anyhow!("Connection '{}' is not a StaticResponse sink", endpoint.connection)
+                })?;
+            // StaticResponseSink doesn't have route-specific properties, so we just clone it.
+            Ok(Arc::new(static_sink.clone()))
+        }
     }
 }
 
@@ -486,6 +503,12 @@ async fn create_http_sink(
     config: &HttpConfig,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
     Ok(Arc::new(HttpSink::new(config).await?))
+}
+async fn create_static_response_sink(
+    config: &StaticResponseEndpoint,
+) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
+    info!(config = ?config, "Creating static response sink");
+    Ok(Arc::new(StaticResponseSink::new(config)?))
 }
 
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]

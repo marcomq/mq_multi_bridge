@@ -80,6 +80,7 @@ pub enum ConnectionType {
     Mqtt(MqttConfig),
     File(FileConfig),
     Http(HttpConfig),
+    StaticResponse(StaticResponseEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -109,6 +110,12 @@ pub struct FileEndpoint {}
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct HttpEndpoint {
     pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct StaticResponseEndpoint {
+    #[serde(default = "default_static_response_content")]
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -178,6 +185,7 @@ pub enum SinkEndpointType {
     Mqtt(MqttEndpoint),
     File(FileEndpoint),
     Http(HttpEndpoint),
+    StaticResponse(StaticResponseEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -186,6 +194,10 @@ pub struct Route {
     pub source: SourceEndpoint,
     pub sink: SinkEndpoint,
 }
+fn default_static_response_content() -> String {
+    "OK".to_string()
+}
+
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {

@@ -1,0 +1,30 @@
+# CONFIG_FILE=tests/config.http2file.yml cargo run
+
+log_level: "info"
+logger: "plain"
+sled_path: "/tmp/integration_test_db"
+dedup_ttl_seconds: 60
+
+connections:
+  - name: "http_in"
+    http: 
+      listen_address: "0.0.0.0:8080"
+      # This sink will be used to generate the HTTP response.
+      # The message from the http_in source will be sent to this sink,
+      # and the content of the message *after* this sink processes it
+      # will be the HTTP response. The file sink replaces the message
+      # content with the content of its configured file.
+      response_sink: "http_ok_response"
+  - name: "file_out"
+    file: {path: "/tmp/output.log"}
+  - name: "http_ok_response"
+    staticresponse: {content: "Message processed"}
+
+routes:
+  - name: "http_to_log"
+    source:
+      connection: "http_in"
+      http: {}
+    sink:
+      connection: "file_out"
+      file: {} # The path is defined in the connection, not here.
