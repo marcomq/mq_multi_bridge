@@ -129,8 +129,8 @@ pub async fn run(
     let mut bridge_tasks = Vec::new();
 
     for route in &config.routes {
-        let source = create_source_from_route(&config, &sources, &route.source).await?;
-        let sink = create_sink_from_route(&sinks, &route.sink).await?;
+        let source = create_source_from_route(&config, &route.name, &sources, &route.source).await?;
+        let sink = create_sink_from_route(&route.name, &sinks, &route.sink).await?;
 
         let bridge_task = run_bridge_instance(
             route.name.clone(),
@@ -156,12 +156,13 @@ pub async fn run(
 
 async fn create_source_from_route(
     config: &Config,
+    route_name: &str,
     sources: &HashMap<String, Arc<dyn MessageSource + Send + Sync>>,
     endpoint: &SourceEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
     let conn_source = sources
         .get(&endpoint.connection)
-        .with_context(|| format!("Source connection '{}' not found", endpoint.connection))?;
+        .with_context(|| format!("[route:{}] Source connection '{}' not found", route_name, endpoint.connection))?;
 
     match &endpoint.endpoint_type {
         SourceEndpointType::Kafka(KafkaEndpoint { topic }) => {
@@ -169,6 +170,7 @@ async fn create_source_from_route(
                 .as_any()
                 .downcast_ref::<crate::kafka::KafkaSource>()
                 .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka source", endpoint.connection))?;
+            let topic = topic.as_deref().unwrap_or(route_name);
             Ok(Arc::new(kafka_source.with_topic(topic)?))
         }
         SourceEndpointType::Nats(NatsEndpoint { subject, stream }) => {
@@ -181,27 +183,30 @@ async fn create_source_from_route(
                     ConnectionType::Nats(nc) => Some(nc),
                     _ => None,
                 })
-                .ok_or_else(|| anyhow!("NATS connection '{}' not found or is not a NATS connection type", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] NATS connection '{}' not found or is not a NATS connection type", route_name, endpoint.connection))?;
 
             let nats_source = conn_source
                 .as_any()
                 .downcast_ref::<NatsSource>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not a NATS source", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not a NATS source", route_name, endpoint.connection))?;
 
+            let subject = subject.as_deref().unwrap_or(route_name);
             Ok(Arc::new(nats_source.with_subject_and_stream(subject, stream, conn_config).await?))
         }
         SourceEndpointType::Amqp(AmqpEndpoint { queue }) => {
             let amqp_source = conn_source
                 .as_any()
                 .downcast_ref::<AmqpSource>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not an AMQP source", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not an AMQP source", route_name, endpoint.connection))?;
+            let queue = queue.as_deref().unwrap_or(route_name);
             Ok(Arc::new(amqp_source.with_queue(queue).await?))
         }
         SourceEndpointType::Mqtt(MqttEndpoint { topic }) => {
             let mqtt_source = conn_source
                 .as_any()
                 .downcast_ref::<MqttSource>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT source", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not an MQTT source", route_name, endpoint.connection))?;
+            let topic = topic.as_deref().unwrap_or(route_name);
             Ok(Arc::new(mqtt_source.with_topic(topic).await?))
         }
         SourceEndpointType::File(FileEndpoint {}) => {
@@ -222,6 +227,7 @@ async fn create_source_from_route(
 }
 
 async fn create_sink_from_route(
+    route_name: &str,
     sinks: &HashMap<String, Arc<dyn MessageSink + Send + Sync>>,
     endpoint: &SinkEndpoint,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
@@ -234,28 +240,32 @@ async fn create_sink_from_route(
             let kafka_sink = conn_sink
                 .as_any()
                 .downcast_ref::<KafkaSink>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not a Kafka sink", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not a Kafka sink", route_name, endpoint.connection))?;
+            let topic = topic.as_deref().unwrap_or(route_name);
             Ok(Arc::new(kafka_sink.with_topic(topic)))
         }
         SinkEndpointType::Nats(NatsEndpoint { subject, stream: _ }) => { // Stream is not needed for sink
             let nats_sink = conn_sink
                 .as_any()
                 .downcast_ref::<NatsSink>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not a NATS sink", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not a NATS sink", route_name, endpoint.connection))?;
+            let subject = subject.as_deref().unwrap_or(route_name);
             Ok(Arc::new(nats_sink.with_subject(subject)))
         }
         SinkEndpointType::Amqp(AmqpEndpoint { queue }) => {
             let amqp_sink = conn_sink
                 .as_any()
                 .downcast_ref::<AmqpSink>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not an AMQP sink", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not an AMQP sink", route_name, endpoint.connection))?;
+            let queue = queue.as_deref().unwrap_or(route_name);
             Ok(Arc::new(amqp_sink.with_routing_key(queue)))
         }
         SinkEndpointType::Mqtt(MqttEndpoint { topic }) => {
             let mqtt_sink = conn_sink
                 .as_any()
                 .downcast_ref::<MqttSink>()
-                .ok_or_else(|| anyhow!("Connection '{}' is not an MQTT sink", endpoint.connection))?;
+                .ok_or_else(|| anyhow!("[route:{}] Connection '{}' is not an MQTT sink", route_name, endpoint.connection))?;
+            let topic = topic.as_deref().unwrap_or(route_name);
             Ok(Arc::new(mqtt_sink.with_topic(topic)))
         }
         SinkEndpointType::File(FileEndpoint {}) => {
@@ -392,7 +402,7 @@ async fn run_bridge_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Connection, DlqConfig};
+    use crate::config::{Connection, DlqConfig, DlqKafkaEndpoint};
 
     #[tokio::test]
     async fn test_run_duplicate_connection_name() {
@@ -438,8 +448,8 @@ mod tests {
             connections: vec![],
             dlq: Some(DlqConfig {
                 connection: "kafka_main".to_string(),
-                kafka: KafkaEndpoint {
-                    topic: "my_dlq".to_string(),
+                kafka: DlqKafkaEndpoint {
+                    topic: "my_dlq".to_string()
                 },
             }),
             ..Default::default()

@@ -7,7 +7,8 @@ Current status is work in progress. Don't use it without testing and fixing.
 
 ## Features
 
-- **Multiple Broker Support**: Connects Kafka, NATS, AMQP (e.g., RabbitMQ), and MQTT in any direction.
+- **Multiple Broker Support**: Connects Kafka, NATS, AMQP (e.g., RabbitMQ), MQTT, and HTTP in any direction.
+- **HTTP Integration**: Expose an HTTP endpoint as a message source (e.g., for webhooks) or use an HTTP endpoint as a sink to call external APIs. Supports request-response patterns.
 - **File I/O**: Use local files as a source (reading line-by-line) or a sink (appending messages), perfect for testing and simple logging.
 - **Performant**: Built with Tokio for asynchronous, non-blocking I/O.
 - **Deduplication**: Prevents processing of duplicate messages within a configurable time window when running in single instance mode.
@@ -100,6 +101,10 @@ connections:
     mqtt:
       url: "tcp://mqtt.example.com:1883"
       client_id: "bridge-iot-client"
+  - name: "http_api"
+    http:
+      listen_address: "0.0.0.0:8080" # For source
+      url: "http://localhost:9999/default" # Default for sink
   - name: "input_file"
     file:
       path: "/var/data/input.log"
@@ -118,21 +123,17 @@ routes:
   - name: "kafka_us_to_nats_events"
     source:
       connection: "kafka_us_east"
-      kafka:
-        topic: "raw_events"
+      kafka: # Topic is optional, defaults to route name: "kafka_us_to_nats_events"
     sink:
       connection: "nats_main"
-      nats:
-        subject: "processed.events"
+      nats: # Subject is optional, defaults to route name
   - name: "amqp_to_kafka_eu_orders"
     source:
       connection: "rabbitmq_prod"
-      amqp:
-        queue: "incoming_orders"
+      amqp: # Queue is optional, defaults to route name
     sink:
       connection: "kafka_eu_west"
-      kafka:
-        topic: "orders"
+      kafka: # Topic is optional, defaults to route name
   - name: "nats_to_mqtt_iot"
     source:
       connection: "nats_main"
@@ -140,8 +141,23 @@ routes:
         subject: "processed.events"
     sink:
       connection: "mqtt_iot"
-      mqtt:
-        topic: "iot/data"
+      mqtt: # Topic is optional, defaults to route name
+  - name: "webhook_to_kafka"
+    source:
+      connection: "http_api"
+      http: {} # No config needed for source
+    sink:
+      connection: "kafka_eu_west"
+      kafka: {} # Topic defaults to "webhook_to_kafka"
+  - name: "kafka_to_external_api"
+    source:
+      connection: "kafka_eu_west"
+      kafka:
+        topic: "outgoing.events"
+    sink:
+      connection: "http_api"
+      http:
+        url: "https://api.example.com/ingest" # Override default URL
   - name: "file_to_kafka"
     source:
       connection: "input_file"

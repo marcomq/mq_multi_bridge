@@ -79,23 +79,23 @@ pub enum ConnectionType {
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct KafkaEndpoint {
-    pub topic: String,
+    pub topic: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct NatsEndpoint {
-    pub subject: String,
+    pub subject: Option<String>,
     pub stream: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AmqpEndpoint {
-    pub queue: String,
+    pub queue: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct MqttEndpoint {
-    pub topic: String,
+    pub topic: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -209,13 +209,19 @@ impl Default for MetricsConfig {
         }
     }
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DlqKafkaEndpoint {
+    pub topic: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DlqConfig {
     pub connection: String,
-    pub kafka: KafkaEndpoint,
+    pub kafka: DlqKafkaEndpoint,
 }
 
-#[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
     use super::*;
 
@@ -248,8 +254,8 @@ connections:
 dlq:
   connection: "kafka_main"
   # The topic must be nested under the endpoint type, 'kafka' in this case.
-  kafka: 
-    topic: "my_dlq" 
+  kafka:
+    topic: "my_dlq"
 
 routes:
   - name: "kafka_to_nats"
@@ -284,3 +290,4 @@ routes:
         assert_eq!(route.source.connection, "kafka_main");
     }
 }
+
