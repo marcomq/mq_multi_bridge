@@ -1,7 +1,11 @@
 use std::path::Path;
 
 use anyhow::Result;
+use std::collections::HashMap;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::{model::CanonicalMessage, sinks::MessageSink, sources::{BoxedMessageStream, MessageSource}};
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KafkaConfig {
@@ -135,6 +139,7 @@ pub enum SourceEndpointType {
     Mqtt(MqttSourceEndpoint),
     File(FileSourceEndpoint),
     Http(HttpSourceEndpoint),
+    Empty(EmptyEndpoint), // just needed for env variables
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -151,21 +156,21 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
     let config_file = std::env::var("CONFIG_FILE").unwrap_or_else(|_| "config.yml".to_string());
 
     let settings = config::Config::builder()
-        .add_source(
-            // You can add a config file here, e.g., config::File::with_name("config.yaml")
-            config::File::from(Path::new(&config_file)).required(false),
-        )
+        // Start with default values
+        .set_default("log_level", "info")?
+        .set_default("sled_path", "/tmp/dedup_db")?
+        .set_default("dedup_ttl_seconds", 86400)?        
+        // Load from a configuration file, if it exists.
+        .add_source(config::File::from(Path::new(&config_file)).required(false))
+        // Load from environment variables, which will override file and defaults.
         .add_source(
             config::Environment::default()
                 .prefix("BRIDGE")
                 .separator("__")
+                .ignore_empty(true)
                 .try_parsing(true),
         )
-        .set_default("log_level", "info")?
-        .set_default("sled_path", "/tmp/dedup_db")?
-        .set_default("dedup_ttl_seconds", 86400)?
         .build()?;
-
     settings.try_deserialize()
 }
 
@@ -179,11 +184,11 @@ pub enum SinkEndpointType {
     File(FileSinkEndpoint),
     Http(HttpSinkEndpoint),
     StaticResponse(StaticResponseEndpoint),
+    Empty(EmptyEndpoint), // just needed for env variables
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Route {
-    pub name: String,
     pub source: SourceEndpoint,
     pub sink: SinkEndpoint,
     pub dlq: Option<DlqConfig>,
@@ -202,10 +207,8 @@ pub struct Config {
     pub dedup_ttl_seconds: u64,
     #[serde(default)]
     pub metrics: MetricsConfig,
-    // #[serde(default)]
-    // pub connections: Vec<Connection>,
     #[serde(default)]
-    pub routes: Vec<Route>,
+    pub routes: HashMap<String, Route>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -254,6 +257,32 @@ pub struct HttpSourceEndpoint {
     pub config: HttpConfig,
     #[serde(flatten)]
     pub endpoint: HttpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct EmptyEndpoint;
+
+
+#[async_trait]
+impl MessageSink for EmptyEndpoint {
+    async fn send(&self, _message: crate::model::CanonicalMessage) -> anyhow::Result<Option<crate::model::CanonicalMessage>> {
+        Ok(None)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait]
+impl MessageSource for EmptyEndpoint {
+    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        Err(anyhow::anyhow!("EmptyEndpoint cannot receive messages"))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -347,7 +376,7 @@ metrics:
   listen_address: "0.0.0.0:9191"
 
 routes:
-  - name: "kafka_to_nats"
+  kafka_to_nats:
     source:
       kafka:
         brokers: "kafka:9092"
@@ -371,12 +400,56 @@ routes:
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.routes.len(), 1);
 
-        let route = &config.routes[0];
-        assert_eq!(route.name, "kafka_to_nats");
+        let route = &config.routes["kafka_to_nats"];
         assert!(route.dlq.is_some());
         if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
             assert_eq!(k.config.brokers, "kafka:9092");
             assert_eq!(k.endpoint.topic.as_deref(), Some("in_topic"));
+        }
+    }
+
+    #[test]
+    fn test_config_from_env_vars() {
+        // Set environment variables
+        // Clear the var first to avoid interference from other tests
+        std::env::remove_var("BRIDGE__LOG_LEVEL");
+        std::env::set_var("BRIDGE__LOG_LEVEL", "trace");
+        std::env::set_var("BRIDGE__LOGGER", "json");
+        std::env::set_var("BRIDGE__SLED_PATH", "/tmp/env_test_db");
+        std::env::set_var("BRIDGE__DEDUP_TTL_SECONDS", "300");
+
+        // Route 0: Kafka to NATS
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__BROKERS", "env-kafka:9092");
+        // Source
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__GROUP_ID", "env-group");
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__TOPIC", "env-in-topic");
+        // Sink
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__URL", "nats://env-nats:4222");
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__SUBJECT", "env-out-subject");
+        // DLQ
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__BROKERS", "env-dlq-kafka:9092");
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__GROUP_ID", "env-dlq-group");
+        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__TOPIC", "env-dlq-topic");
+
+        // Load config
+        let config = load_config().unwrap();
+
+        // Assertions
+        assert_eq!(config.log_level, "trace");
+        assert_eq!(config.logger, "json");
+        assert_eq!(config.sled_path, "/tmp/env_test_db");
+        assert_eq!(config.dedup_ttl_seconds, 300);
+        assert_eq!(config.routes.len(), 1);
+
+        let (name, route) = config.routes.iter().next().unwrap();
+        assert_eq!(name, "kafka_to_nats_from_env");
+
+        // Assert source
+        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+            assert_eq!(k.config.brokers, "env-kafka:9092");
+            assert_eq!(k.endpoint.topic.as_deref(), Some("env-in-topic"));
+        } else {
+            panic!("Expected Kafka source");
         }
     }
 }

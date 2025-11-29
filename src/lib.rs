@@ -18,11 +18,7 @@ pub mod store;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, FileConfig, FileSinkEndpoint,
-    FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig,
-    KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, Route,
-    NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, SinkEndpoint, SinkEndpointType,
-    SourceEndpoint, SourceEndpointType, StaticResponseEndpoint,
+    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, EmptyEndpoint, FileConfig, FileSinkEndpoint, FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig, KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, Route, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType, StaticResponseEndpoint
 };
 use crate::file::{FileSink, FileSource};
 use crate::http::{HttpSink, HttpSource};
@@ -45,14 +41,14 @@ pub struct Bridge {
     config: Config,
     dedup_store: Arc<DeduplicationStore>,
     bridge_tasks: Vec<tokio::task::JoinHandle<()>>, // The task itself returns (), JoinHandle wraps it in a Result for panics
-    shutdown_rx: tokio::sync::watch::Receiver<()>,
+    shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 }
 
 impl Bridge {
     /// Creates a new Bridge from a configuration object.
     pub fn from_config(
         config: Config,
-        shutdown_rx: tokio::sync::watch::Receiver<()>,
+        shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
     ) -> Result<Self> {
         let dedup_store = Arc::new(DeduplicationStore::new(
             &config.sled_path,
@@ -70,9 +66,9 @@ impl Bridge {
     }
 
     /// Adds a route to the bridge, connecting a source to a sink.
-    pub async fn add_route(&mut self, route: &Route) -> Result<()> {
-        let source = create_source_from_route(&route.name, &route.source).await?;
-        let sink = create_sink_from_route(&route.name, &route.sink).await?;
+    pub async fn add_route(&mut self, name: &str, route: &Route) -> Result<()> {
+        let source = create_source_from_route(name, &route.source).await?;
+        let sink = create_sink_from_route(name, &route.sink).await?;
         let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
             let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
             Some(create_kafka_sink(&dlq_config.kafka.config, topic).await?)
@@ -81,12 +77,33 @@ impl Bridge {
         };
 
         let bridge_task = run_bridge_instance(
-            route.name.clone(),
+            name.to_string(),
             source,
             sink,
             self.dedup_store.clone(),
             dlq_sink,
-            self.shutdown_rx.clone(),
+            self.shutdown_rx.as_ref().map(|rx| rx.clone()),
+        );
+        self.bridge_tasks.push(tokio::spawn(bridge_task));
+        Ok(())
+    }
+
+    /// Adds a custom route with pre-constructed source and sink.
+    pub async fn add_custom_route(
+        &mut self,
+        route_name: &str,
+        source: Arc<dyn MessageSource + Send + Sync>,
+        sink: Arc<dyn MessageSink + Send + Sync>,
+        dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
+    ) -> Result<()> {
+        info!(route = %route_name, "Adding custom route");
+        let bridge_task = run_bridge_instance(
+            route_name.to_string(),
+            source,
+            sink,
+            self.dedup_store.clone(),
+            dlq_sink,
+            self.shutdown_rx.as_ref().map(|rx| rx.clone()),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
         Ok(())
@@ -94,12 +111,15 @@ impl Bridge {
 
     /// Initializes all connections and routes from the configuration.
     pub async fn initialize_from_config(&mut self) -> Result<()> {
-        for route in self.config.routes.clone() {
-            match self.add_route(&route).await {
+        for (name, route) in self.config.routes.clone() {
+            if let SourceEndpointType::Empty(_) = route.source.endpoint_type {
+                continue;
+            }
+            match self.add_route(&name, &route).await {
                 Ok(_) => (),
                 Err(e) => {
                     // Log the error and continue with other routes.
-                    error!(route = %route.name, error = %e, "Failed to initialize route. It will be skipped.");
+                    error!(route = %name, error = %e, "Failed to initialize route. It will be skipped.");
                 }
             }
         }
@@ -145,6 +165,9 @@ async fn create_source_from_route(
             create_file_source(config).await
         }
         SourceEndpointType::Http(HttpSourceEndpoint { config, .. }) => create_http_source(config).await,
+        SourceEndpointType::Empty(_) => {
+            Ok(Arc::new(EmptyEndpoint{}))
+        }
     }
 }
 
@@ -179,6 +202,9 @@ async fn create_sink_from_route(
         }
         SinkEndpointType::StaticResponse(config) => {
             create_static_response_sink(config).await
+        }
+        SinkEndpointType::Empty(_) => {
+            Ok(Arc::new(EmptyEndpoint{}))
         }
     }
 }
@@ -261,17 +287,23 @@ async fn run_bridge_instance(
     sink: Arc<dyn MessageSink + Send + Sync>,
     dedup_store: Arc<DeduplicationStore>, // Assuming this is still needed
     dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<()>,
+    mut shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 ) {
     loop {
         tokio::select! {
             // Biased ensures we check for shutdown first if both are ready
             biased;
-            _ = shutdown_rx.changed() => {
-                info!("Shutdown signal received, stopping message consumption.");
-                break;
-            }
-
+            _ = async {
+                if let Some(rx) = &mut shutdown_rx {
+                    rx.changed().await.ok();
+                } else {
+                    // If no shutdown receiver, this future will never resolve.
+                    futures::future::pending::<()>().await;
+                }
+            } => {
+                    info!("Shutdown signal received, stopping message consumption.");
+                    break;
+                }
             result = source.receive() => {
                 match result {
                     Ok((message, commit)) => {
@@ -339,11 +371,16 @@ mod tests {
     #[test]
     fn test_dlq_config_requires_kafka() {
         let config = Config {
-            log_level: "info".to_string(),
-            sled_path: "/tmp/test_dedup".to_string(),
+            // Use a unique path to avoid test conflicts
+            sled_path: tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("db")
+                .to_str()
+                .unwrap()
+                .to_string(),
             dedup_ttl_seconds: 60, // connections: vec![],
-            routes: vec![Route {
-                name: "test_route".to_string(),
+            routes: [("test_route".to_string(), Route {
                 source: SourceEndpoint {
                     endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
                         config: FileConfig {
@@ -370,14 +407,14 @@ mod tests {
                         },
                     },
                 }),
-            }],
+            })].into(),
             ..Default::default()
         };
         // This test primarily checks deserialization logic via the config test.
         // A runtime test would require more mocking. Here we just assert the structure.
         assert_eq!(
             config
-                .routes[0]
+                .routes["test_route"]
                 .dlq
                 .as_ref()
                 .unwrap()
@@ -386,5 +423,132 @@ mod tests {
                 .topic,
             Some("my_dlq".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_add_route() {
+        use tempfile::tempdir;
+        use tokio::fs;
+
+        let dir = tempdir().unwrap();
+        let in_path = dir.path().join("input.log");
+        let out_path = dir.path().join("output.log");
+
+        // Write a message to the input file
+        let test_message = r#"{"message_id":"7a7c8e3e-55b3-4b4f-8d9a-3e3e3e3e3e3e","payload":"hello"}"#;
+        fs::write(&in_path, test_message).await.unwrap();
+
+        let route = Route {            
+            source: SourceEndpoint {
+                endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
+                    config: FileConfig {
+                        path: in_path.to_str().unwrap().to_string(),
+                    },
+                    endpoint: crate::config::FileEndpoint {},
+                }),
+            },
+            sink: SinkEndpoint {
+                endpoint_type: SinkEndpointType::File(FileSinkEndpoint {
+                    config: FileConfig {
+                        path: out_path.to_str().unwrap().to_string(),
+                    },
+                    endpoint: crate::config::FileEndpoint {},
+                }),
+            },
+            dlq: None,
+        };
+
+        let config = Config::default();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        let mut bridge = Bridge::from_config(config, Some(shutdown_rx)).unwrap();
+        bridge.add_route("file-to-file-test", &route).await.unwrap();
+
+        let bridge_handle = tokio::spawn(bridge.run());
+
+        // Give it a moment to process the file
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let output_content = fs::read_to_string(&out_path).await.unwrap();
+        assert!(output_content.contains(r#""payload":"hello""#));
+
+        _shutdown_tx.send(()).unwrap();
+        bridge_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_add_custom_route() {
+        use crate::model::CanonicalMessage;
+        use crate::sinks::MessageSink;
+        use tempfile::tempdir;
+        use async_trait::async_trait;
+        use serde_json::json;
+        use std::any::Any;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // 1. Define a custom sink
+        #[derive(Clone)]
+        struct TestSink {
+            was_called: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl MessageSink for TestSink {
+            async fn send(
+                &self,
+                _message: CanonicalMessage,
+            ) -> anyhow::Result<Option<CanonicalMessage>> {
+                self.was_called.store(true, Ordering::SeqCst);
+                Ok(None)
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        // 2. Create a source
+        let source = crate::http::HttpSource::new(&HttpConfig {
+            listen_address: Some("0.0.0.0:9998".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // 3. Setup the bridge
+        let mut config = Config::default();
+        let dir = tempdir().unwrap();
+        // Use a unique path to avoid test conflicts
+        config.sled_path = dir.path().join("db").to_str().unwrap().to_string();
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        let mut bridge = Bridge::from_config(config.clone(), Some(shutdown_rx)).unwrap();
+
+        let custom_sink = Arc::new(TestSink {
+            was_called: Arc::new(AtomicBool::new(false)),
+        });
+
+        bridge
+            .add_custom_route("custom-test-route", Arc::new(source), custom_sink.clone(), None)
+            .await
+            .unwrap();
+
+        let bridge_handle = tokio::spawn(bridge.run());
+
+        // 4. Send a message to the source
+        let client = reqwest::Client::new();
+        let res = client
+            .post("http://127.0.0.1:9998")
+            .json(&json!({"test": "message"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success());
+
+        // 5. Assert that the sink was called
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(custom_sink.was_called.load(Ordering::SeqCst));
+
+        // 6. Shutdown
+        _shutdown_tx.send(()).unwrap();
+        bridge_handle.await.unwrap().unwrap();
     }
 }

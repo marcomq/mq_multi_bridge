@@ -53,10 +53,13 @@ impl HttpSource {
 
         let tls_config = config.tls.clone();
         let handle = Handle::new();
+        // Channel to signal when the server is ready
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
 
         tokio::spawn(async move {
             if tls_config.is_tls_server_configured() {
                 info!("Starting HTTPS source on {}", addr);
+
                 // We clone the paths to move them into the async block.
                 let cert_path = tls_config.cert_file.unwrap();
                 let key_path = tls_config.key_file.unwrap();
@@ -64,18 +67,27 @@ impl HttpSource {
                 let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
                 .await
                 .unwrap();
+
+                // Signal that we are about to start serving
+                let _ = ready_tx.send(());
+
                 axum_server::bind_rustls(addr, tls_config)
                     .handle(handle)
                     .serve(app.into_make_service())
                     .await
                     .unwrap();
             } else {
-                info!("Starting HTTP source on {}", addr);
                 let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                info!("Starting HTTP source on {}", listener.local_addr().unwrap());
+
+                // Signal that we are about to start serving
+                let _ = ready_tx.send(());
+
                 axum::serve(listener, app).await.unwrap();
             }
         });
 
+        ready_rx.await?;
         Ok(Self {
             request_rx: Arc::new(tokio::sync::Mutex::new(request_rx)),
         })

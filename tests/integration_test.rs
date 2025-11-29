@@ -129,8 +129,7 @@ async fn test_end_to_end_routing() {
     let test_config: AppConfig = settings.try_deserialize().unwrap();
 
     // Run the bridge in a separate task
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, shutdown_rx).unwrap();
+    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
     bridge.initialize_from_config().await.unwrap();
 
     let bridge_task = tokio::spawn(bridge.run());

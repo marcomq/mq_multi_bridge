@@ -66,7 +66,7 @@ async fn run_app(config: Config) -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
     // --- 3. Run the bridge logic from the library ---
-    let mut bridge = Bridge::from_config(config, shutdown_rx)?;
+    let mut bridge = Bridge::from_config(config, Some(shutdown_rx))?;
     bridge.initialize_from_config().await?;
 
     let mut bridge_handle = tokio::spawn(bridge.run());
