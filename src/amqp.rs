@@ -14,7 +14,7 @@ use lapin::{
     types::FieldTable,
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -119,14 +119,26 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
         conn_uri = url.to_string();
     }
 
-    let conn_props = ConnectionProperties::default();
-    let conn = if config.tls.required {
-        let tls_config = build_tls_config(config).await?;
-        Connection::connect_with_config(&conn_uri, conn_props, tls_config).await?
-    } else {
-        Connection::connect(&conn_uri, conn_props).await?
-    };
-    Ok(conn)
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        info!(url = %conn_uri, attempt = attempt, "Attempting to connect to AMQP broker");
+        let conn_props = ConnectionProperties::default();
+        let result = if config.tls.required {
+            let tls_config = build_tls_config(config).await?;
+            Connection::connect_with_config(&conn_uri, conn_props, tls_config).await
+        } else {
+            Connection::connect(&conn_uri, conn_props).await
+        };
+
+        match result {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                last_error = Some(e);
+                tokio::time::sleep(Duration::from_secs(attempt * 2)).await; // Exponential backoff
+            }
+        }
+    }
+    Err(anyhow!("Failed to connect to AMQP after multiple attempts: {:?}", last_error.unwrap()))
 }
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {

@@ -99,7 +99,7 @@ impl KafkaSource {
             .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
-            .set("socket.connection.setup.timeout.ms", "10000"); // 10 seconds
+            .set("socket.connection.setup.timeout.ms", "30000"); // 30 seconds
 
         if config.tls.required {
             client_config.set("security.protocol", "ssl");

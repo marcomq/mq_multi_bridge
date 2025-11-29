@@ -176,7 +176,8 @@ async fn create_sink_from_route(
         }
         SinkEndpointType::Nats(NatsSinkEndpoint { config, endpoint }) => {
             let subject = endpoint.subject.as_deref().unwrap_or(route_name);
-            create_nats_sink(config, subject).await
+            // Pass the stream name from the endpoint config to the sink constructor
+            create_nats_sink(config, subject, endpoint.stream.as_deref()).await
         }
         SinkEndpointType::Amqp(AmqpSinkEndpoint { config, endpoint }) => {
             let queue = endpoint.queue.as_deref().unwrap_or(route_name);
@@ -222,8 +223,9 @@ async fn create_nats_source(
 async fn create_nats_sink(
     config: &NatsConfig,
     subject: &str,
+    stream_name: Option<&str>,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(NatsSink::new(config, subject).await?))
+    Ok(Arc::new(NatsSink::new(config, subject, stream_name).await?))
 }
 async fn create_amqp_source(
     config: &AmqpConfig,
@@ -357,6 +359,8 @@ async fn run_bridge_instance(
             }
         }
     }
+    // TODO: Wait properly for Sinks before shutting down
+    sleep(Duration::from_secs(1)).await;
     info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
 }
 

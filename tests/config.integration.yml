@@ -49,6 +49,7 @@ routes:
       nats:
         url: "nats://localhost:4222"
         subject: "test_subject_nats"
+        stream: "test-stream" # Tell the sink which stream to create
 
   # Reads from NATS subject 'test_subject_nats' and writes to /tmp/output_nats.log
   nats_to_file:

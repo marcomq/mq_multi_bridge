@@ -12,7 +12,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::Duration};
 use tracing::info;
 
 pub struct NatsSink {
@@ -21,17 +21,17 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub async fn new(config: &NatsConfig, subject: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &NatsConfig, subject: &str, stream_name: Option<&str>) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client.clone());
 
         // Ensure the stream exists. This is idempotent.
-        // The stream name is taken from the default_stream in the config, which is what the source will use.
-        if let Some(stream_name) = &config.default_stream {
+        // The stream name is now passed in directly.
+        if let Some(stream_name) = stream_name {
             info!(stream = %stream_name, "Ensuring NATS stream exists");
             jetstream.get_or_create_stream(stream::Config {
-                name: stream_name.clone(),
+                name: stream_name.to_string(),
                 subjects: vec![format!("{}*", subject.trim_end_matches(".*"))], // Capture this subject and any sub-subjects
                 ..Default::default()
             }).await?;
@@ -86,7 +86,20 @@ impl NatsSource {
         let jetstream = jetstream::new(client);
 
         // Create a new consumer specifically for the given subject.
-        let stream = jetstream.get_stream(stream_name).await?;
+        // Retry getting the stream to handle race conditions where the sink is still creating it.
+        let mut stream = None;
+        for _ in 0..10 {
+            match jetstream.get_stream(stream_name).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+        let stream = stream.ok_or_else(|| anyhow!("Failed to get NATS stream '{}' after multiple retries", stream_name))?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject
