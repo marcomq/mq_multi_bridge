@@ -3,7 +3,7 @@ use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
-use async_nats::{jetstream, Client, ConnectOptions, jetstream::stream};
+use async_nats::{jetstream, ConnectOptions, jetstream::stream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -16,7 +16,7 @@ use tokio::{sync::Mutex, time::Duration};
 use tracing::info;
 
 pub struct NatsSink {
-    client: Client,
+    jetstream: jetstream::Context,
     subject: String,
 }
 
@@ -32,7 +32,11 @@ impl NatsSink {
             info!(stream = %stream_name, "Ensuring NATS stream exists");
             jetstream.get_or_create_stream(stream::Config {
                 name: stream_name.to_string(),
-                subjects: vec![format!("{}*", subject.trim_end_matches(".*"))], // Capture this subject and any sub-subjects
+                // The stream must be configured to capture the specific subject,
+                // and optionally any sub-subjects if it's a wildcard.
+                // A subject filter of `foo.>` will match `foo.bar` but not `foo`.
+                // So we need both `subject` and `subject.*` if we want to match both.
+                subjects: vec![subject.to_string(), format!("{}.>", subject)],
                 ..Default::default()
             }).await?;
         } else {
@@ -40,14 +44,14 @@ impl NatsSink {
         }
 
         Ok(Self {
-            client,
+            jetstream,
             subject: subject.to_string(),
         })
     }
 
     pub fn with_subject(&self, subject: &str) -> Self {
         Self {
-            client: self.client.clone(),
+            jetstream: self.jetstream.clone(),
             subject: subject.to_string(),
         }
     }
@@ -57,10 +61,11 @@ impl NatsSink {
 impl MessageSink for NatsSink {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_vec(&message)?;
-        self.client
+        // Use jetstream.publish and await the ack future to guarantee delivery.
+        self.jetstream
             .publish(self.subject.clone(), payload.into())
-            .await?;
-        self.client.flush().await?; // Ensures the message is sent
+            .await?
+            .await?; // This second await waits for the server acknowledgement.
         Ok(None)
     }
 

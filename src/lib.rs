@@ -368,6 +368,11 @@ async fn run_bridge_instance(
             }
         }
     }
+    // In a testing context, a file-based source might finish before other routes
+    // have had time to initialize or process messages. This small delay ensures that sinks
+    // have time to complete their work (e.g., publishing to a broker) before this task exits.
+    // TODO: properly wait for sink completion instead of a fixed delay.
+    sleep(Duration::from_secs(2)).await;
     info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
 }
 
