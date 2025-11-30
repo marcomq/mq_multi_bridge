@@ -5,5 +5,8 @@ use std::any::Any;
 #[async_trait]
 pub trait MessageSink: Send + Sync + 'static {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>>;
+    async fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any;
 }
