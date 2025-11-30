@@ -4,16 +4,17 @@ use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use rumqttc::ClientError;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 pub struct MqttSink {
     client: AsyncClient,
     topic: String,
+    _eventloop_handle: Arc<JoinHandle<()>>,
 }
 
 impl MqttSink {
@@ -23,16 +24,19 @@ impl MqttSink {
         bridge_id: &str,
     ) -> anyhow::Result<Self> {
         let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
-        tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+        let eventloop_handle =
+            tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
         Ok(Self {
             client,
             topic: topic.to_string(),
+            _eventloop_handle: Arc::new(eventloop_handle),
         })
     }
     pub fn with_topic(&self, topic: &str) -> Self {
         Self {
             client: self.client.clone(),
             topic: topic.to_string(),
+            _eventloop_handle: self._eventloop_handle.clone(),
         }
     }
 }
@@ -56,6 +60,7 @@ pub struct MqttSource {
     client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
     message_rx: Arc<Mutex<mpsc::Receiver<rumqttc::Publish>>>,
+    _eventloop_handle: Arc<JoinHandle<()>>,
 }
 
 impl MqttSource {
@@ -63,8 +68,14 @@ impl MqttSource {
         let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
         let (message_tx, message_rx) = mpsc::channel(10);
 
+        // The subscription must happen *after* the client is connected.
+        // The best place for this is inside the eventloop task itself,
+        // which can wait for the connection to be established.
+        let topic_clone = topic.to_string();
+        let client_clone = client.clone();
+
         // Spawn a dedicated task to poll the eventloop
-        tokio::spawn(async move {
+        let eventloop_handle = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
@@ -81,18 +92,21 @@ impl MqttSource {
                         error!("MQTT Source eventloop error: {}", e);
                         break;
                     }
+                    Ok(Event::Outgoing(rumqttc::Outgoing::Subscribe(_))) => {
+                        info!(topic = %topic_clone, "MQTT source subscribed");
+                    }
                     _ => {} // Ignore other events
                 }
             }
         });
 
-        if !topic.is_empty() {
-            client.subscribe(topic, QoS::AtLeastOnce).await?;
-            info!(topic = %topic, "MQTT source subscribed");
-        }
+        // Initiate the subscription. The confirmation will be handled in the eventloop.
+        client.subscribe(topic, QoS::AtLeastOnce).await?;
+
         Ok(Self {
             client,
             message_rx: Arc::new(Mutex::new(message_rx)),
+            _eventloop_handle: Arc::new(eventloop_handle),
         })
     }
 
@@ -105,6 +119,13 @@ impl MqttSource {
     // Add an accessor for the client
     pub fn client(&self) -> AsyncClient {
         self.client.clone()
+    }
+}
+
+impl Drop for MqttSource {
+    fn drop(&mut self) {
+        // When the source is dropped, abort its background eventloop task.
+        self._eventloop_handle.abort();
     }
 }
 
@@ -139,72 +160,54 @@ async fn create_client_and_eventloop(
     config: &MqttConfig,
     bridge_id: &str,
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
-    let mut last_error: Option<ClientError> = None;
-    for attempt in 1..=5 {
-        let (host, port) = parse_url(&config.url)?;
-        // Use a unique client ID based on the bridge_id to prevent collisions.
-        let client_id = format!("mq-multi-bridge-{}", bridge_id);
-        let mut mqttoptions = MqttOptions::new(client_id, host, port);
+    let (host, port) = parse_url(&config.url)?;
+    // Use a unique client ID based on the bridge_id to prevent collisions.
+    let client_id = format!("mq-multi-bridge-{}", bridge_id);
+    let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
-        mqttoptions.set_keep_alive(Duration::from_secs(20));
-        mqttoptions.set_clean_session(true);
+    mqttoptions.set_keep_alive(Duration::from_secs(20));
+    mqttoptions.set_clean_session(true);
 
-        if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            mqttoptions.set_credentials(username, password);
-        }
-
-        if config.tls.required {
-            let mut root_cert_store = rustls::RootCertStore::empty();
-            if let Some(ca_file) = &config.tls.ca_file {
-                let mut ca_buf = std::io::BufReader::new(std::fs::File::open(ca_file)?);
-                let certs = rustls_pemfile::certs(&mut ca_buf).collect::<Result<Vec<_>, _>>()?;
-                for cert in certs {
-                    root_cert_store.add(cert.into())?;
-                }
-            }
-
-            let client_config_builder =
-                rustls::ClientConfig::builder().with_root_certificates(root_cert_store);
-
-            let mut client_config = if config.tls.is_mtls_client_configured() {
-                let cert_file = config.tls.cert_file.as_ref().unwrap();
-                let key_file = config.tls.key_file.as_ref().unwrap();
-                let cert_chain = load_certs(cert_file)?;
-                let key_der = load_private_key(key_file)?;
-                client_config_builder.with_client_auth_cert(cert_chain, key_der)?
-            } else {
-                client_config_builder.with_no_client_auth()
-            };
-
-            if config.tls.accept_invalid_certs {
-                warn!("MQTT TLS is configured to accept invalid certificates. This is insecure and should not be used in production.");
-                let mut dangerous_config = client_config.dangerous();
-                dangerous_config.set_certificate_verifier(Arc::new(NoopServerCertVerifier {}));
-            }
-            mqttoptions.set_transport(Transport::tls_with_config(client_config.into()));
-        }
-
-        let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
-        // The rumqttc client doesn't connect immediately. We check the connection by trying to subscribe.
-        match client
-            .subscribe("mq-bridge-health-check", QoS::AtMostOnce)
-            .await
-        {
-            Ok(_) => {
-                info!(url = %config.url, "Connected to MQTT broker");
-                client.unsubscribe("mq-bridge-health-check").await?;
-                return Ok((client, eventloop));
-            }
-            Err(e) => {
-                last_error = Some(e);
-                tokio::time::sleep(Duration::from_secs(attempt * 2)).await;
-            }
-        }
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        mqttoptions.set_credentials(username, password);
     }
-    Err(anyhow!(
-        "Failed to connect to MQTT after multiple attempts: {:?}",
-        last_error.unwrap()
-    ))
+
+    if config.tls.required {
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        if let Some(ca_file) = &config.tls.ca_file {
+            let mut ca_buf = std::io::BufReader::new(std::fs::File::open(ca_file)?);
+            let certs = rustls_pemfile::certs(&mut ca_buf).collect::<Result<Vec<_>, _>>()?;
+            for cert in certs {
+                root_cert_store.add(cert.into())?;
+            }
+        }
+
+        let client_config_builder =
+            rustls::ClientConfig::builder().with_root_certificates(root_cert_store);
+
+        let mut client_config = if config.tls.is_mtls_client_configured() {
+            let cert_file = config.tls.cert_file.as_ref().unwrap();
+            let key_file = config.tls.key_file.as_ref().unwrap();
+            let cert_chain = load_certs(cert_file)?;
+            let key_der = load_private_key(key_file)?;
+            client_config_builder.with_client_auth_cert(cert_chain, key_der)?
+        } else {
+            client_config_builder.with_no_client_auth()
+        };
+
+        if config.tls.accept_invalid_certs {
+            warn!("MQTT TLS is configured to accept invalid certificates. This is insecure and should not be used in production.");
+            let mut dangerous_config = client_config.dangerous();
+            dangerous_config.set_certificate_verifier(Arc::new(NoopServerCertVerifier {}));
+        }
+        mqttoptions.set_transport(Transport::tls_with_config(client_config.into()));
+    }
+
+    let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
+    // The connection is established by the eventloop automatically.
+    // We don't need a manual health check. If connection fails, the eventloop will error out.
+    info!(url = %config.url, "MQTT client created. Eventloop will connect.");
+    Ok((client, eventloop))
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -281,6 +284,7 @@ impl Clone for MqttSource {
         Self {
             client: self.client.clone(),
             message_rx: self.message_rx.clone(),
+            _eventloop_handle: self._eventloop_handle.clone(),
         }
     }
 }
