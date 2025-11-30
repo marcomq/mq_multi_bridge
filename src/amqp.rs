@@ -16,7 +16,7 @@ use lapin::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{debug, info};
 
 pub struct AmqpSink {
     channel: Channel,
@@ -198,7 +198,7 @@ impl MessageSource for AmqpSource {
                     .ack(BasicAckOptions::default())
                     .await
                     .expect("Failed to ack AMQP message");
-                info!(
+                debug!(
                     delivery_tag = delivery.delivery_tag,
                     "AMQP message acknowledged"
                 );
