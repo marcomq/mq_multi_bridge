@@ -30,7 +30,7 @@ impl DeduplicationStore {
 
         if let Some(value) = optional_value {
             // Value is the timestamp of insertion
-            let ts_bytes: [u8; 8] = value.as_ref().try_into().unwrap();
+            let ts_bytes: [u8; 8] = value.as_ref().try_into().expect("DB value is not a u64");
             let insertion_ts = u64::from_be_bytes(ts_bytes);
 
             // Check if TTL has expired
@@ -47,6 +47,11 @@ impl DeduplicationStore {
         self.db.insert(key, &now.to_be_bytes())?;
         Ok(false)
     }
+
+    /// Flushes the database to disk asynchronously.
+    pub async fn flush_async(&self) -> Result<usize, sled::Error> {
+        self.db.flush_async().await
+    }
 }
 
 #[cfg(test)]
@@ -56,15 +61,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_is_duplicate_new_and_seen() {
+    fn test_is_duplicate_new_and_seen() { // This test is now synchronous
         let dir = tempdir().unwrap();
         let store = DeduplicationStore::new(dir.path(), 60).unwrap();
         let message_id = Uuid::new_v4();
 
-        // First time seeing this ID, should not be a duplicate
+        // First time seeing this ID, should not be a duplicate.
         assert!(!store.is_duplicate(&message_id).unwrap());
 
-        // Second time, should be a duplicate
+        // Second time, should be a duplicate.
         assert!(store.is_duplicate(&message_id).unwrap());
     }
 

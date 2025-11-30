@@ -117,11 +117,13 @@ impl MessageSink for KafkaSink {
         let payload = serde_json::to_string(&message)?;
         let key: String = message.message_id.to_string();
         let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
-
-        self.producer
-            .send(record, Duration::from_secs(5))
-            .await
-            .map_err(|(e, _)| anyhow!("Kafka send error: {}", e))?;
+        
+        // "Fire and forget" send. The `FutureProducer` will handle batching and sending in the background.
+        // We don't await the result here to avoid blocking and to allow for high throughput.
+        // The producer is configured with retries, and the `Drop` impl handles flushing.
+        if let Err((e, _)) = self.producer.send_result(record) {
+            return Err(anyhow!("Kafka send error: {}", e));
+        }
         Ok(None)
     }
 

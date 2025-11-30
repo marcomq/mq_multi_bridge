@@ -312,6 +312,18 @@ async fn run_bridge_instance(
     let mut tasks = JoinSet::new();
     let mut message_count = 0u64;
 
+    // Spawn a task to periodically flush the deduplication database
+    let dedup_flusher = dedup_store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if let Err(e) = dedup_flusher.flush_async().await {
+                error!(error = %e, "Failed to flush deduplication store");
+            }
+        }
+    });
+
     // Wait to ensure all routes are fully initialized
     // This is critical when multiple routes share the same brokers (e.g., file->NATS->file)
     // The delay must be long enough for consumers to subscribe before producers start sending
@@ -347,16 +359,16 @@ async fn run_bridge_instance(
 
                         tasks.spawn(async move {
                             let _permit = permit;
-                            process_message(message, commit, sink, dlq, dedup, id).await;
+                            process_message(message, commit, sink, &dlq, dedup, id).await;
                         });
                     }
                     Err(e) => {
-                        if e.to_string().contains("End of file reached") {
-                            info!("Source reached EOF. Waiting for in-flight messages...");
-                            break;
-                        }
                         // For timeouts or other transient errors, just continue
                         trace!(error = %e, "Temporary error receiving message");
+                        // If the source signals completion (like EOF), break the loop to start shutdown.
+                        // This is done after processing the error to ensure we don't miss a legitimate transient error.
+                        info!("Source stream ended. Waiting for in-flight messages...");
+                        break;
                     }
                 }
             }
@@ -381,7 +393,7 @@ async fn process_message(
     message: crate::model::CanonicalMessage,
     commit: crate::sources::BoxedMessageStream,
     sink: Arc<dyn crate::sinks::MessageSink + Send + Sync>,
-    dlq: Option<Arc<dyn crate::sinks::MessageSink + Send + Sync>>,
+    dlq: &Option<Arc<dyn crate::sinks::MessageSink + Send + Sync>>,
     dedup: Arc<DeduplicationStore>,
     route_id: String,
 ) {
@@ -389,7 +401,7 @@ async fn process_message(
     let start = std::time::Instant::now();
 
     // Check for duplicate
-    if dedup.is_duplicate(&msg_id).unwrap_or(false) {
+    if dedup.is_duplicate(&msg_id).unwrap_or(false) { // TODO: unwrap
         trace!(message_id = %msg_id, "Duplicate message, skipping");
         counter!("bridge_messages_duplicate_total", "route" => route_id.clone()).increment(1);
         commit(None).await;
@@ -419,7 +431,7 @@ async fn process_message(
                     error!(message_id = %msg_id, "Max retries exceeded, sending to DLQ");
                     counter!("bridge_messages_dlq_total", "route" => route_id.clone()).increment(1);
                     
-                    if let Some(dlq_sink) = dlq {
+                    if let Some(dlq_sink) = dlq.as_ref() {
                         if let Err(e) = dlq_sink.send(message).await {
                             error!(message_id = %msg_id, error = %e, "Failed to send to DLQ");
                         }
