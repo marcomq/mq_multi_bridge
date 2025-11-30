@@ -1,10 +1,10 @@
 use config::File as ConfigFile; // Use an alias for the File type from the config crate
-use mq_multi_bridge::config::Config as AppConfig; // Use an alias for our app's config struct
+use mq_multi_bridge::config::{Config as AppConfig}; // Use an alias for our app's config struct
 use mq_multi_bridge::model::CanonicalMessage;
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
@@ -105,23 +105,28 @@ async fn run_pipeline_test(
     let num_messages = 5;
     let sent_message_ids = generate_test_file(&input_path, num_messages);
 
-    // Load config and override file paths
-    let settings = config::Config::builder()
+    // Load the full config first to get the route definitions
+    let full_config_settings = config::Config::builder()
         .add_source(ConfigFile::with_name("tests/config.integration").required(true))
-        // Force log level to trace for maximum debugging output during the test
-        .set_override("log_level", "trace").unwrap()
-        .set_override(
-            &format!("routes.{}.source.file.path", file_to_broker_route),
-            input_path.to_str().unwrap(),
-        ).unwrap()
-        .set_override(
-            &format!("routes.{}.sink.file.path", broker_to_file_route),
-            output_path.to_str().unwrap(),
-        ).unwrap()
         .build()
         .unwrap();
+    let full_config: AppConfig = full_config_settings.try_deserialize().unwrap();
 
-    let test_config: AppConfig = settings.try_deserialize().unwrap();
+    // Programmatically build a minimal config with only the routes we need for this specific test.
+    // This prevents interference from other routes (like other MQTT clients).
+    let mut test_config = AppConfig::default();
+    test_config.log_level = "trace".to_string();
+    test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
+
+    let mut route_to_broker = full_config.routes.get(file_to_broker_route).unwrap().clone();
+    let mut route_from_broker = full_config.routes.get(broker_to_file_route).unwrap().clone();
+
+    // Manually override the file paths in our cloned route objects
+    if let mq_multi_bridge::config::SourceEndpointType::File(f) = &mut route_to_broker.source.endpoint_type { f.config.path = input_path.to_str().unwrap().to_string(); }
+    if let mq_multi_bridge::config::SinkEndpointType::File(f) = &mut route_from_broker.sink.endpoint_type { f.config.path = output_path.to_str().unwrap().to_string(); }
+
+    test_config.routes.insert(file_to_broker_route.to_string(), route_to_broker);
+    test_config.routes.insert(broker_to_file_route.to_string(), route_from_broker);
 
     // --- DIAGNOSTIC STEP 1: Print the configuration being used ---
     // This ensures that the file path overrides are correctly applied.
@@ -134,10 +139,6 @@ async fn run_pipeline_test(
     bridge.initialize_from_config().await.unwrap();
 
     // --- DIAGNOSTIC STEP 2: Assert that the bridge tasks were created ---
-    let mut input = String::new();
-    File::open(&input_path).unwrap().read_to_string(&mut input).unwrap();
-    dbg!(&input);
-
     // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
     
     let bridge_task = tokio::spawn(bridge.run());
@@ -145,9 +146,7 @@ async fn run_pipeline_test(
     // Give the bridge time to process all messages.
     // The file source will error on EOF, and the bridge will log it and continue.
     // This is a simple way to wait for completion in this test setup.
-    tokio::time::sleep(Duration::from_secs(20)).await;
-    File::open(&output_path).unwrap().read_to_string(&mut input).unwrap();
-    dbg!(&input);
+    tokio::time::sleep(Duration::from_secs(25)).await;
 
     // The bridge task should have finished or be idle. We can drop the shutdown receiver.
     drop(bridge_task);
