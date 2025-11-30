@@ -56,6 +56,18 @@ impl MessageSink for MqttSink {
     }
 }
 
+impl Drop for MqttSink {
+    fn drop(&mut self) {
+        // To ensure all buffered messages are sent before the client is dropped,
+        // we spawn a task to perform a graceful disconnect. This is crucial for sinks
+        // that might be dropped immediately after sending, like in a file-to-broker scenario.
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.disconnect().await;
+        });
+    }
+}
+
 pub struct MqttSource {
     client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
@@ -72,7 +84,6 @@ impl MqttSource {
         // The best place for this is inside the eventloop task itself,
         // which can wait for the connection to be established.
         let topic_clone = topic.to_string();
-        let client_clone = client.clone();
 
         // Spawn a dedicated task to poll the eventloop
         let eventloop_handle = tokio::spawn(async move {
@@ -100,7 +111,7 @@ impl MqttSource {
             }
         });
 
-        // Initiate the subscription. The confirmation will be handled in the eventloop.
+        // The rumqttc client will queue this and send it once the connection is established by the eventloop.
         client.subscribe(topic, QoS::AtLeastOnce).await?;
 
         Ok(Self {
@@ -162,7 +173,7 @@ async fn create_client_and_eventloop(
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
     let (host, port) = parse_url(&config.url)?;
     // Use a unique client ID based on the bridge_id to prevent collisions.
-    let client_id = format!("mq-multi-bridge-{}", bridge_id);
+    let client_id = sanitize_for_client_id(&format!("mq-multi-bridge-{}", bridge_id));
     let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
     mqttoptions.set_keep_alive(Duration::from_secs(20));
@@ -208,6 +219,15 @@ async fn create_client_and_eventloop(
     // We don't need a manual health check. If connection fails, the eventloop will error out.
     info!(url = %config.url, "MQTT client created. Eventloop will connect.");
     Ok((client, eventloop))
+}
+
+/// Sanitizes a string to be used as part of an MQTT client ID.
+/// Replaces non-alphanumeric characters with a hyphen.
+fn sanitize_for_client_id(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
