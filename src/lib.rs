@@ -197,7 +197,7 @@ async fn create_kafka_sink(
     config: &KafkaConfig,
     topic: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(KafkaSink::new(config, topic)?))
+    Ok(Arc::new(KafkaSink::new(config, topic).await?))
 }
 async fn create_nats_source(
     config: &NatsConfig,
@@ -312,6 +312,11 @@ async fn run_bridge_instance(
     let mut tasks = JoinSet::new();
     let mut message_count = 0u64;
 
+    // Wait to ensure all routes are fully initialized
+    // This is critical when multiple routes share the same brokers (e.g., file->NATS->file)
+    // The delay must be long enough for consumers to subscribe before producers start sending
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
     // Main message processing loop
     loop {
         tokio::select! {
@@ -362,6 +367,12 @@ async fn run_bridge_instance(
     info!(bridge_id = %bridge_id, messages_processed = message_count, "Shutting down, waiting for in-flight tasks...");
     tasks.shutdown().await;
     while tasks.join_next().await.is_some() {}
+    
+    // Flush the sink to ensure all data is written
+    if let Err(e) = sink.flush().await {
+        warn!(bridge_id = %bridge_id, error = %e, "Failed to flush sink");
+    }
+    
     info!(bridge_id = %bridge_id, "Bridge shut down gracefully");
 }
 

@@ -2,12 +2,14 @@ use crate::config::KafkaConfig;
 use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
     consumer::{CommitMode, Consumer, StreamConsumer},
+    error::RDKafkaErrorCode,
     ClientConfig, Message, TopicPartitionList,
 };
 use std::sync::Arc;
@@ -21,7 +23,7 @@ pub struct KafkaSink {
 }
 
 impl KafkaSink {
-    pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+    pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         let mut client_config = ClientConfig::new();
         client_config
             .set("bootstrap.servers", &config.brokers)
@@ -57,7 +59,31 @@ impl KafkaSink {
             client_config.set("sasl.password", password);
             client_config.set("security.protocol", "sasl_ssl");
         }
-        let producer: FutureProducer = client_config.create()?;
+
+        // Create the topic if it doesn't exist
+        let admin_client: AdminClient<_> = client_config.create()?;
+        let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+        let results = admin_client
+            .create_topics(&[new_topic], &AdminOptions::new())
+            .await?;
+
+        // Check the result of the topic creation.
+        // It's okay if the topic already exists.
+        for result in results {
+            match result {
+                Ok(topic_name) => info!(topic = %topic_name, "Kafka topic created or already exists"),
+                Err((topic_name, error_code)) => {
+                    if error_code != RDKafkaErrorCode::TopicAlreadyExists {
+                        return Err(anyhow!(
+                            "Failed to create Kafka topic '{}': {}",
+                            topic_name, error_code
+                        ));
+                    }
+                }
+            }
+        }
+
+        let producer: FutureProducer = client_config.create().context("Failed to create Kafka producer")?;
         Ok(Self {
             producer,
             topic: topic.to_string(),

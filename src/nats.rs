@@ -99,14 +99,16 @@ impl NatsSource {
         // Create a new consumer specifically for the given subject.
         // Retry getting the stream to handle race conditions where the sink is still creating it.
         let mut stream = None;
-        for _ in 0..10 {
+        for attempt in 0..20 {
             match jetstream.get_stream(stream_name).await {
                 Ok(s) => {
                     stream = Some(s);
                     break;
                 }
                 Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if attempt < 19 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
         }
@@ -126,11 +128,16 @@ impl NatsSource {
                     subject.replace('.', "-")
                 )),
                 filter_subject: subject.to_string(),
-                // Ensure the consumer starts from the beginning of the stream.
+                // Start from the beginning of the stream for all messages
                 deliver_policy: jetstream::consumer::DeliverPolicy::All,
+                // Set a reasonable max ack pending to ensure we don't lose messages
+                max_ack_pending: 10000,
                 ..Default::default()
             })
             .await?;
+
+        // Give the consumer a moment to be ready
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let subscription = consumer.messages().await?;
         info!(stream = %stream_name, subject = %subject, "NATS source subscribed to subject");
