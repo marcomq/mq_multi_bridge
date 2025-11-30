@@ -3,7 +3,7 @@ use crate::model::CanonicalMessage;
 use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
-use async_nats::{jetstream, ConnectOptions, jetstream::stream};
+use async_nats::{jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -21,7 +21,11 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub async fn new(config: &NatsConfig, subject: &str, stream_name: Option<&str>) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: &NatsConfig,
+        subject: &str,
+        stream_name: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client.clone());
@@ -30,15 +34,17 @@ impl NatsSink {
         // The stream name is now passed in directly.
         if let Some(stream_name) = stream_name {
             info!(stream = %stream_name, "Ensuring NATS stream exists");
-            jetstream.get_or_create_stream(stream::Config {
-                name: stream_name.to_string(),
-                // The stream must be configured to capture the specific subject,
-                // and optionally any sub-subjects if it's a wildcard.
-                // A subject filter of `foo.>` will match `foo.bar` but not `foo`.
-                // So we need both `subject` and `subject.*` if we want to match both.
-                subjects: vec![subject.to_string(), format!("{}.>", subject)],
-                ..Default::default()
-            }).await?;
+            jetstream
+                .get_or_create_stream(stream::Config {
+                    name: stream_name.to_string(),
+                    // The stream must be configured to capture the specific subject,
+                    // and optionally any sub-subjects if it's a wildcard.
+                    // A subject filter of `foo.>` will match `foo.bar` but not `foo`.
+                    // So we need both `subject` and `subject.*` if we want to match both.
+                    subjects: vec![subject.to_string(), format!("{}.>", subject)],
+                    ..Default::default()
+                })
+                .await?;
         } else {
             info!("No default_stream configured for NATS sink, skipping stream creation. This may not work with a JetStream source.");
         }
@@ -104,7 +110,12 @@ impl NatsSource {
                 }
             }
         }
-        let stream = stream.ok_or_else(|| anyhow!("Failed to get NATS stream '{}' after multiple retries", stream_name))?;
+        let stream = stream.ok_or_else(|| {
+            anyhow!(
+                "Failed to get NATS stream '{}' after multiple retries",
+                stream_name
+            )
+        })?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject

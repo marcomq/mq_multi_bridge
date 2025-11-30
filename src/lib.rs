@@ -18,7 +18,11 @@ pub mod store;
 
 use crate::amqp::{AmqpSink, AmqpSource};
 use crate::config::{
-    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, FileConfig, FileSinkEndpoint, FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig, KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint, NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, Route, SinkEndpoint, SinkEndpointType, SourceEndpoint, SourceEndpointType, StaticResponseEndpoint
+    AmqpConfig, AmqpSinkEndpoint, AmqpSourceEndpoint, Config, FileConfig, FileSinkEndpoint,
+    FileSourceEndpoint, HttpConfig, HttpSinkEndpoint, HttpSourceEndpoint, KafkaConfig,
+    KafkaSinkEndpoint, KafkaSourceEndpoint, MqttConfig, MqttSinkEndpoint, MqttSourceEndpoint,
+    NatsConfig, NatsSinkEndpoint, NatsSourceEndpoint, Route, SinkEndpoint, SinkEndpointType,
+    SourceEndpoint, SourceEndpointType, StaticResponseEndpoint,
 };
 use crate::file::{FileSink, FileSource};
 use crate::http::{HttpSink, HttpSource};
@@ -26,9 +30,9 @@ use crate::kafka::KafkaSink;
 use crate::mqtt::{MqttSink, MqttSource};
 use crate::nats::NatsSink;
 use crate::nats::NatsSource;
-use crate::static_response::StaticResponseSink;
 use crate::sinks::MessageSink;
 use crate::sources::MessageSource;
+use crate::static_response::StaticResponseSink;
 use crate::store::DeduplicationStore;
 use anyhow::{anyhow, Result};
 use metrics::{counter, histogram};
@@ -136,22 +140,15 @@ async fn create_source_from_route(
             create_amqp_source(config, queue).await
         }
         SourceEndpointType::Mqtt(MqttSourceEndpoint { config, endpoint }) => {
-            // For MQTT, the source and sink for a given route should share a client.
-            // We create the source here, which also creates the client and eventloop.
-            // The sink will later get a handle to this client.
-            // This is a bit of a special case due to rumqttc's design.
-            if route_name.starts_with("file_to_") {
-                 // This is a sink-first route, create a source with a dummy topic
-                 create_mqtt_source(config, "").await
-            } else {
-                let topic = endpoint.topic.as_deref().unwrap_or(route_name);
-                create_mqtt_source(config, topic).await
-            }
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_mqtt_source(config, topic).await
         }
         SourceEndpointType::File(FileSourceEndpoint { config, .. }) => {
             create_file_source(config).await
         }
-        SourceEndpointType::Http(HttpSourceEndpoint { config, .. }) => create_http_source(config).await,
+        SourceEndpointType::Http(HttpSourceEndpoint { config, .. }) => {
+            create_http_source(config).await
+        }
     }
 }
 
@@ -174,14 +171,8 @@ async fn create_sink_from_route(
             create_amqp_sink(config, queue).await
         }
         SinkEndpointType::Mqtt(MqttSinkEndpoint { config, endpoint }) => {
-             // This is part of the client sharing pattern for MQTT.
-             // We assume the corresponding source has already been created and we can get its client.
-             // This is a bit of a hack and relies on the route naming convention.
-             // A more robust solution might involve a shared client manager.
-             let source_route_name = route_name.replace("mqtt_to_file", "file_to_mqtt");
-             let topic = endpoint.topic.as_deref().unwrap_or(&source_route_name);
-             let source = create_mqtt_source(config, "").await?; // Create a dummy source to get a client
-             create_mqtt_sink(source.as_any().downcast_ref::<MqttSource>().unwrap().client(), topic).await
+            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+            create_mqtt_sink(config, topic).await
         }
         SinkEndpointType::File(FileSinkEndpoint { config, .. }) => create_file_sink(config).await,
         SinkEndpointType::Http(HttpSinkEndpoint { config, endpoint }) => {
@@ -191,9 +182,7 @@ async fn create_sink_from_route(
             }
             Ok(Arc::new(sink))
         }
-        SinkEndpointType::StaticResponse(config) => {
-            create_static_response_sink(config).await
-        }
+        SinkEndpointType::StaticResponse(config) => create_static_response_sink(config).await,
     }
 }
 
@@ -214,7 +203,9 @@ async fn create_nats_source(
     stream_name: &str,
     subject: &str,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(NatsSource::new(config, stream_name, subject).await?))
+    Ok(Arc::new(
+        NatsSource::new(config, stream_name, subject).await?,
+    ))
 }
 async fn create_nats_sink(
     config: &NatsConfig,
@@ -242,10 +233,10 @@ async fn create_mqtt_source(
     Ok(Arc::new(MqttSource::new(config, topic).await?))
 }
 async fn create_mqtt_sink(
-    client: rumqttc::AsyncClient,
+    config: &MqttConfig,
     topic: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(MqttSink::new(client, topic)?))
+    Ok(Arc::new(MqttSink::new(config, topic).await?))
 }
 async fn create_file_source(
     config: &FileConfig,
@@ -281,8 +272,10 @@ async fn run_bridge_instance(
     // Create a unique deduplication store for this specific bridge instance.
     // This is crucial for tests to prevent routes from interfering with each other.
     let db_path = Path::new(&config.sled_path).join(&bridge_id);
-    let dedup_store = Arc::new(DeduplicationStore::new(db_path, config.dedup_ttl_seconds)
-        .expect("Failed to create instance-specific deduplication store"));
+    let dedup_store = Arc::new(
+        DeduplicationStore::new(db_path, config.dedup_ttl_seconds)
+            .expect("Failed to create instance-specific deduplication store"),
+    );
 
     let route_or_components: RouteOrComponents = route_or_components.into();
 
@@ -395,7 +388,11 @@ async fn run_bridge_instance(
 #[derive(Clone)]
 enum RouteOrComponents {
     Route(Route),
-    Components(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>),
+    Components(
+        Arc<dyn MessageSource + Send + Sync>,
+        Arc<dyn MessageSink + Send + Sync>,
+        Option<Arc<dyn MessageSink + Send + Sync>>,
+    ),
 }
 
 impl From<Route> for RouteOrComponents {
@@ -404,24 +401,37 @@ impl From<Route> for RouteOrComponents {
     }
 }
 
-impl From<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)> for RouteOrComponents {
-    fn from(components: (Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)) -> Self {
+impl
+    From<(
+        Arc<dyn MessageSource + Send + Sync>,
+        Arc<dyn MessageSink + Send + Sync>,
+        Option<Arc<dyn MessageSink + Send + Sync>>,
+    )> for RouteOrComponents
+{
+    fn from(
+        components: (
+            Arc<dyn MessageSource + Send + Sync>,
+            Arc<dyn MessageSink + Send + Sync>,
+            Option<Arc<dyn MessageSink + Send + Sync>>,
+        ),
+    ) -> Self {
         RouteOrComponents::Components(components.0, components.1, components.2)
     }
 }
 
 impl RouteOrComponents {
-    async fn try_into_components(self, route_name: &str) -> Result<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)> {
+    async fn try_into_components(
+        self,
+        route_name: &str,
+    ) -> Result<(
+        Arc<dyn MessageSource + Send + Sync>,
+        Arc<dyn MessageSink + Send + Sync>,
+        Option<Arc<dyn MessageSink + Send + Sync>>,
+    )> {
         match self {
-            RouteOrComponents::Route(route) => {                
+            RouteOrComponents::Route(route) => {
                 let source = create_source_from_route(route_name, &route.source).await?;
-                let sink = if let SinkEndpointType::Mqtt(_) = &route.sink.endpoint_type {
-                    // Special handling for MQTT to share the client from the source
-                    let topic = route.sink.endpoint_type.topic().unwrap_or(route_name);
-                    create_mqtt_sink(source.as_any().downcast_ref::<MqttSource>().unwrap().client(), topic).await?
-                } else {
-                    create_sink_from_route(route_name, &route.sink).await?
-                };
+                let sink = create_sink_from_route(route_name, &route.sink).await?;
 
                 let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
                     let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
@@ -435,16 +445,6 @@ impl RouteOrComponents {
         }
     }
 }
-
-impl SinkEndpointType {
-    fn topic(&self) -> Option<&str> {
-        match self {
-            SinkEndpointType::Mqtt(e) => e.endpoint.topic.as_deref(),
-            _ => None
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -463,41 +463,44 @@ mod tests {
                 .unwrap()
                 .to_string(),
             dedup_ttl_seconds: 60, // connections: vec![],
-            routes: [("test_route".to_string(), Route {
-                source: SourceEndpoint {
-                    endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
-                        config: FileConfig {
-                            path: "/dev/null".to_string(),
-                        },
-                        endpoint: crate::config::FileEndpoint {},
-                    }),
-                },
-                sink: SinkEndpoint {
-                    endpoint_type: SinkEndpointType::File(FileSinkEndpoint {
-                        config: FileConfig {
-                            path: "/dev/null".to_string(),
-                        },
-                        endpoint: crate::config::FileEndpoint {},
-                    }),
-                },
-                dlq: Some(DlqConfig {
-                    kafka: KafkaSinkEndpoint {
-                        config: KafkaConfig {
-                            ..Default::default()
-                        },
-                        endpoint: crate::config::KafkaEndpoint {
-                            topic: Some("my_dlq".to_string()),
-                        },
+            routes: [(
+                "test_route".to_string(),
+                Route {
+                    source: SourceEndpoint {
+                        endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
+                            config: FileConfig {
+                                path: "/dev/null".to_string(),
+                            },
+                            endpoint: crate::config::FileEndpoint {},
+                        }),
                     },
-                }),
-            })].into(),
+                    sink: SinkEndpoint {
+                        endpoint_type: SinkEndpointType::File(FileSinkEndpoint {
+                            config: FileConfig {
+                                path: "/dev/null".to_string(),
+                            },
+                            endpoint: crate::config::FileEndpoint {},
+                        }),
+                    },
+                    dlq: Some(DlqConfig {
+                        kafka: KafkaSinkEndpoint {
+                            config: KafkaConfig {
+                                ..Default::default()
+                            },
+                            endpoint: crate::config::KafkaEndpoint {
+                                topic: Some("my_dlq".to_string()),
+                            },
+                        },
+                    }),
+                },
+            )]
+            .into(),
             ..Default::default()
         };
         // This test primarily checks deserialization logic via the config test.
         // A runtime test would require more mocking. Here we just assert the structure.
         assert_eq!(
-            config
-                .routes["test_route"]
+            config.routes["test_route"]
                 .dlq
                 .as_ref()
                 .unwrap()
@@ -518,10 +521,11 @@ mod tests {
         let out_path = dir.path().join("output.log");
 
         // Write a message to the input file
-        let test_message = r#"{"message_id":"7a7c8e3e-55b3-4b4f-8d9a-3e3e3e3e3e3e","payload":"hello"}"#;
+        let test_message =
+            r#"{"message_id":"7a7c8e3e-55b3-4b4f-8d9a-3e3e3e3e3e3e","payload":"hello"}"#;
         fs::write(&in_path, test_message).await.unwrap();
 
-        let route = Route {            
+        let route = Route {
             source: SourceEndpoint {
                 endpoint_type: SourceEndpointType::File(FileSourceEndpoint {
                     config: FileConfig {
@@ -562,12 +566,12 @@ mod tests {
     async fn test_add_custom_route() {
         use crate::model::CanonicalMessage;
         use crate::sinks::MessageSink;
-        use tempfile::tempdir;
         use async_trait::async_trait;
         use serde_json::json;
         use std::any::Any;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
+        use tempfile::tempdir;
 
         // 1. Define a custom sink
         #[derive(Clone)]

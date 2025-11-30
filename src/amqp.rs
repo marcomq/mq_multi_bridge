@@ -32,12 +32,16 @@ impl AmqpSink {
         // Ensure the queue exists before we try to publish to it. This is idempotent.
         info!(queue = %routing_key, "Declaring AMQP queue in sink");
         channel
-            .queue_declare(routing_key, QueueDeclareOptions::default(), FieldTable::default())
+            .queue_declare(
+                routing_key,
+                QueueDeclareOptions::default(),
+                FieldTable::default(),
+            )
             .await?;
 
         Ok(Self {
             channel,
-            exchange: "".to_string(),    // Default exchange
+            exchange: "".to_string(), // Default exchange
             routing_key: routing_key.to_string(),
         })
     }
@@ -144,7 +148,10 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
             }
         }
     }
-    Err(anyhow!("Failed to connect to AMQP after multiple attempts: {:?}", last_error.unwrap()))
+    Err(anyhow!(
+        "Failed to connect to AMQP after multiple attempts: {:?}",
+        last_error.unwrap()
+    ))
 }
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {

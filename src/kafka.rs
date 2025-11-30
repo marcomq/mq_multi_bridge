@@ -95,7 +95,7 @@ impl KafkaSource {
         if let Some(group_id) = &config.group_id {
             client_config.set("group.id", group_id);
         }
-        client_config            
+        client_config
             .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")

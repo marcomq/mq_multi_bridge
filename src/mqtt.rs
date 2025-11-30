@@ -17,7 +17,9 @@ pub struct MqttSink {
 }
 
 impl MqttSink {
-    pub fn new(client: AsyncClient, topic: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MqttConfig, topic: &str) -> anyhow::Result<Self> {
+        let (client, mut eventloop) = create_client_and_eventloop(config).await?;
+        tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
         Ok(Self {
             client,
             topic: topic.to_string(),
@@ -180,7 +182,10 @@ async fn create_client_and_eventloop(
 
         let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
         // The rumqttc client doesn't connect immediately. We check the connection by trying to subscribe.
-        match client.subscribe("mq-bridge-health-check", QoS::AtMostOnce).await {
+        match client
+            .subscribe("mq-bridge-health-check", QoS::AtMostOnce)
+            .await
+        {
             Ok(_) => {
                 info!(url = %config.url, "Connected to MQTT broker");
                 client.unsubscribe("mq-bridge-health-check").await?;
@@ -192,7 +197,10 @@ async fn create_client_and_eventloop(
             }
         }
     }
-    Err(anyhow!("Failed to connect to MQTT after multiple attempts: {:?}", last_error.unwrap()))
+    Err(anyhow!(
+        "Failed to connect to MQTT after multiple attempts: {:?}",
+        last_error.unwrap()
+    ))
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -200,9 +208,7 @@ fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDe
     Ok(rustls_pemfile::certs(&mut cert_buf).collect::<Result<Vec<_>, _>>()?)
 }
 
-fn load_private_key(
-    path: &str,
-) -> anyhow::Result<rustls::pki_types::PrivateKeyDer<'static>> {
+fn load_private_key(path: &str) -> anyhow::Result<rustls::pki_types::PrivateKeyDer<'static>> {
     let mut key_buf = std::io::BufReader::new(std::fs::File::open(path)?);
     let key = rustls_pemfile::private_key(&mut key_buf)?
         .ok_or_else(|| anyhow!("No private key found in {}", path))?;
@@ -225,11 +231,29 @@ impl rustls::client::danger::ServerCertVerifier for NoopServerCertVerifier {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> { Ok(rustls::client::danger::HandshakeSignatureValid::assertion()) }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
 
-    fn verify_tls13_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> { Ok(rustls::client::danger::HandshakeSignatureValid::assertion()) }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
 
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> { rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes() }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {

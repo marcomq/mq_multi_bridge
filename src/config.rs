@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::Result;
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KafkaConfig {
@@ -20,7 +20,7 @@ pub struct TlsConfig {
     pub required: bool,
     pub ca_file: Option<String>,
     pub cert_file: Option<String>,
-    pub key_file: Option<String>, // For PEM keys
+    pub key_file: Option<String>,      // For PEM keys
     pub cert_password: Option<String>, // For PKCS12 certs in AMQP
 }
 
@@ -179,7 +179,7 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
         // Start with default values
         .set_default("log_level", "info")?
         .set_default("sled_path", "/tmp/dedup_db")?
-        .set_default("dedup_ttl_seconds", 86400)?        
+        .set_default("dedup_ttl_seconds", 86400)?
         // Load from a configuration file, if it exists.
         .add_source(config::File::from(Path::new(&config_file)).required(false))
         // Load from environment variables, which will override file and defaults.
@@ -215,7 +215,6 @@ pub struct Route {
 fn default_static_response_content() -> String {
     "OK".to_string()
 }
-
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {
@@ -412,17 +411,41 @@ routes:
         std::env::set_var("BRIDGE__DEDUP_TTL_SECONDS", "300");
 
         // Route 0: Kafka to NATS
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__BROKERS", "env-kafka:9092");
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__BROKERS",
+            "env-kafka:9092",
+        );
         // Source
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__GROUP_ID", "env-group");
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__TOPIC", "env-in-topic");
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__GROUP_ID",
+            "env-group",
+        );
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__TOPIC",
+            "env-in-topic",
+        );
         // Sink
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__URL", "nats://env-nats:4222");
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__SUBJECT", "env-out-subject");
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__URL",
+            "nats://env-nats:4222",
+        );
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__SUBJECT",
+            "env-out-subject",
+        );
         // DLQ
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__BROKERS", "env-dlq-kafka:9092");
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__GROUP_ID", "env-dlq-group");
-        std::env::set_var("BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__TOPIC", "env-dlq-topic");
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__BROKERS",
+            "env-dlq-kafka:9092",
+        );
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__GROUP_ID",
+            "env-dlq-group",
+        );
+        std::env::set_var(
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__TOPIC",
+            "env-dlq-topic",
+        );
 
         // Load config
         let config = load_config().unwrap();

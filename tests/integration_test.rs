@@ -1,10 +1,10 @@
 // cargo test --test integration_test -- --ignored --nocapture --test-threads=1 --show-output
 
 use config::File as ConfigFile; // Use an alias for the File type from the config crate
-use mq_multi_bridge::config::{Config as AppConfig}; // Use an alias for our app's config struct
+use ctor::{ctor, dtor};
+use mq_multi_bridge::config::Config as AppConfig; // Use an alias for our app's config struct
 use mq_multi_bridge::model::CanonicalMessage;
 use serde_json::json;
-use tracing_appender::non_blocking::WorkerGuard;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -12,8 +12,10 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use ctor::{ctor, dtor};
 use tempfile::tempdir;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -60,10 +62,14 @@ impl DockerCompose {
 fn read_output_file(path: &std::path::Path) -> HashSet<String> {
     if !path.exists() {
         // Return an empty set if the file doesn't exist. The assertion on message count will fail with a clearer message.
-        println!("WARNING: Output file not found: {:?}. Assuming no messages were received.", path);
+        println!(
+            "WARNING: Output file not found: {:?}. Assuming no messages were received.",
+            path
+        );
         return HashSet::new();
     }
-    let file = File::open(path).unwrap_or_else(|_| panic!("Failed to open output file: {:?}", path));
+    let file =
+        File::open(path).unwrap_or_else(|_| panic!("Failed to open output file: {:?}", path));
     let reader = BufReader::new(file);
     let mut received_messages = HashSet::new();
 
@@ -80,14 +86,12 @@ fn read_output_file(path: &std::path::Path) -> HashSet<String> {
 }
 
 /// Helper function to run a single end-to-end test pipeline.
-async fn run_pipeline_test(
-    broker_name: &str,
-    config_file_name: &str,
-) {    
-
+async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.log");
-    let output_path = temp_dir.path().join(format!("output_{}.log", broker_name.to_lowercase()));
+    let output_path = temp_dir
+        .path()
+        .join(format!("output_{}.log", broker_name.to_lowercase()));
 
     // Generate a test file with unique messages
     let num_messages = 5;
@@ -103,21 +107,41 @@ async fn run_pipeline_test(
     // Programmatically build a minimal config with only the routes we need for this specific test.
     // This prevents interference from other routes (like other MQTT clients).
     let mut test_config = AppConfig::default();
-    test_config.log_level = "trace".to_string();
+    test_config.log_level = "info".to_string();
     test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
 
     // The routes are now named consistently in the small config files
     let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
     let broker_to_file_route = format!("{}_to_file", broker_name.to_lowercase());
-    let mut route_to_broker = full_config.routes.get(&file_to_broker_route).unwrap().clone();
-    let mut route_from_broker = full_config.routes.get(&broker_to_file_route).unwrap().clone();
+    let mut route_to_broker = full_config
+        .routes
+        .get(&file_to_broker_route)
+        .unwrap()
+        .clone();
+    let mut route_from_broker = full_config
+        .routes
+        .get(&broker_to_file_route)
+        .unwrap()
+        .clone();
 
     // Manually override the file paths in our cloned route objects
-    if let mq_multi_bridge::config::SourceEndpointType::File(f) = &mut route_to_broker.source.endpoint_type { f.config.path = input_path.to_str().unwrap().to_string(); }
-    if let mq_multi_bridge::config::SinkEndpointType::File(f) = &mut route_from_broker.sink.endpoint_type { f.config.path = output_path.to_str().unwrap().to_string(); }
+    if let mq_multi_bridge::config::SourceEndpointType::File(f) =
+        &mut route_to_broker.source.endpoint_type
+    {
+        f.config.path = input_path.to_str().unwrap().to_string();
+    }
+    if let mq_multi_bridge::config::SinkEndpointType::File(f) =
+        &mut route_from_broker.sink.endpoint_type
+    {
+        f.config.path = output_path.to_str().unwrap().to_string();
+    }
 
-    test_config.routes.insert(file_to_broker_route.to_string(), route_to_broker);
-    test_config.routes.insert(broker_to_file_route.to_string(), route_from_broker);
+    test_config
+        .routes
+        .insert(file_to_broker_route.to_string(), route_to_broker);
+    test_config
+        .routes
+        .insert(broker_to_file_route.to_string(), route_from_broker);
 
     // --- DIAGNOSTIC STEP 1: Print the configuration being used ---
     // This ensures that the file path overrides are correctly applied.
@@ -129,7 +153,7 @@ async fn run_pipeline_test(
 
     // --- DIAGNOSTIC STEP 2: Assert that the bridge tasks were created ---
     // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
-    
+
     let bridge_task = tokio::spawn(bridge.run());
 
     // Give the bridge time to process all messages.
@@ -174,9 +198,14 @@ fn startup() {
         .with_writer(non_blocking_writer)
         .with_ansi(false);
 
-    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_filter(LevelFilter::INFO);
 
-    tracing_subscriber::registry().with(file_layer).with(stdout_layer).init();
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(stdout_layer)
+        .init();
 
     DockerCompose::up();
 }
@@ -249,7 +278,9 @@ async fn test_all_pipelines_together() {
     // Override file paths for all routes
     for (route_name, route) in test_config.routes.iter_mut() {
         // Override source file paths
-        if let mq_multi_bridge::config::SourceEndpointType::File(f) = &mut route.source.endpoint_type {
+        if let mq_multi_bridge::config::SourceEndpointType::File(f) =
+            &mut route.source.endpoint_type
+        {
             f.config.path = input_path.to_str().unwrap().to_string();
         }
         // Override sink file paths
@@ -283,7 +314,9 @@ async fn test_all_pipelines_together() {
             received_ids.len(),
             num_messages,
             "TEST FAILED for [{}]: Expected {} messages, but found {}.",
-            broker_name, num_messages, received_ids.len()
+            broker_name,
+            num_messages,
+            received_ids.len()
         );
         assert_eq!(
             sent_message_ids, received_ids,

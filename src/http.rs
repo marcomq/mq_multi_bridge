@@ -65,8 +65,8 @@ impl HttpSource {
                 let key_path = tls_config.key_file.unwrap();
 
                 let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
 
                 // Signal that we are about to start serving
                 let _ = ready_tx.send(());
