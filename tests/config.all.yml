@@ -1,0 +1,60 @@
+# Integration test configuration for all pipelines running together.
+log_level: "info"
+logger: "plain"
+sled_path: "/tmp/integration_test_db_all"
+dedup_ttl_seconds: 60
+
+routes:
+  # --- Kafka Test Routes ---
+  file_to_kafka:
+    source:
+      file:
+        path: "/tmp/input.log" # This will be overridden by the test
+    sink:
+      kafka: { brokers: "localhost:9092", topic: "test_topic_kafka" }
+
+  kafka_to_file:
+    source:
+      kafka: { brokers: "localhost:9092", group_id: "integration_test_group_kafka", topic: "test_topic_kafka" }
+    sink:
+      file: { path: "/tmp/output_kafka.log" } # This will be overridden
+
+  # --- NATS Test Routes ---
+  file_to_nats:
+    source:
+      file:
+        path: "/tmp/input.log" # This will be overridden
+    sink:
+      nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
+
+  nats_to_file:
+    source:
+      nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
+    sink:
+      file: { path: "/tmp/output_nats.log" } # This will be overridden
+
+  # --- AMQP (RabbitMQ) Test Routes ---
+  file_to_amqp:
+    source:
+      file: { path: "/tmp/input.log" } # This will be overridden
+    sink:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
+
+  amqp_to_file:
+    source:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
+    sink:
+      file: { path: "/tmp/output_amqp.log" } # This will be overridden
+
+  # --- MQTT Test Routes ---
+  file_to_mqtt:
+    source:
+      file: { path: "/tmp/input.log" } # This will be overridden
+    sink:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+
+  mqtt_to_file:
+    source:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+    sink:
+      file: { path: "/tmp/output_mqtt.log" } # This will be overridden

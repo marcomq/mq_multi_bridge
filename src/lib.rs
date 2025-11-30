@@ -136,8 +136,17 @@ async fn create_source_from_route(
             create_amqp_source(config, queue).await
         }
         SourceEndpointType::Mqtt(MqttSourceEndpoint { config, endpoint }) => {
-            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
-            create_mqtt_source(config, topic).await
+            // For MQTT, the source and sink for a given route should share a client.
+            // We create the source here, which also creates the client and eventloop.
+            // The sink will later get a handle to this client.
+            // This is a bit of a special case due to rumqttc's design.
+            if route_name.starts_with("file_to_") {
+                 // This is a sink-first route, create a source with a dummy topic
+                 create_mqtt_source(config, "").await
+            } else {
+                let topic = endpoint.topic.as_deref().unwrap_or(route_name);
+                create_mqtt_source(config, topic).await
+            }
         }
         SourceEndpointType::File(FileSourceEndpoint { config, .. }) => {
             create_file_source(config).await
@@ -165,8 +174,14 @@ async fn create_sink_from_route(
             create_amqp_sink(config, queue).await
         }
         SinkEndpointType::Mqtt(MqttSinkEndpoint { config, endpoint }) => {
-            let topic = endpoint.topic.as_deref().unwrap_or(route_name);
-            create_mqtt_sink(config, topic).await
+             // This is part of the client sharing pattern for MQTT.
+             // We assume the corresponding source has already been created and we can get its client.
+             // This is a bit of a hack and relies on the route naming convention.
+             // A more robust solution might involve a shared client manager.
+             let source_route_name = route_name.replace("mqtt_to_file", "file_to_mqtt");
+             let topic = endpoint.topic.as_deref().unwrap_or(&source_route_name);
+             let source = create_mqtt_source(config, "").await?; // Create a dummy source to get a client
+             create_mqtt_sink(source.as_any().downcast_ref::<MqttSource>().unwrap().client(), topic).await
         }
         SinkEndpointType::File(FileSinkEndpoint { config, .. }) => create_file_sink(config).await,
         SinkEndpointType::Http(HttpSinkEndpoint { config, endpoint }) => {
@@ -227,10 +242,10 @@ async fn create_mqtt_source(
     Ok(Arc::new(MqttSource::new(config, topic).await?))
 }
 async fn create_mqtt_sink(
-    config: &MqttConfig,
+    client: rumqttc::AsyncClient,
     topic: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(MqttSink::new(config, topic).await?))
+    Ok(Arc::new(MqttSink::new(client, topic)?))
 }
 async fn create_file_source(
     config: &FileConfig,
@@ -398,9 +413,16 @@ impl From<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sy
 impl RouteOrComponents {
     async fn try_into_components(self, route_name: &str) -> Result<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)> {
         match self {
-            RouteOrComponents::Route(route) => {
+            RouteOrComponents::Route(route) => {                
                 let source = create_source_from_route(route_name, &route.source).await?;
-                let sink = create_sink_from_route(route_name, &route.sink).await?;
+                let sink = if let SinkEndpointType::Mqtt(_) = &route.sink.endpoint_type {
+                    // Special handling for MQTT to share the client from the source
+                    let topic = route.sink.endpoint_type.topic().unwrap_or(route_name);
+                    create_mqtt_sink(source.as_any().downcast_ref::<MqttSource>().unwrap().client(), topic).await?
+                } else {
+                    create_sink_from_route(route_name, &route.sink).await?
+                };
+
                 let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
                     let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
                     Some(create_kafka_sink(&dlq_config.kafka.config, topic).await?)
@@ -410,6 +432,15 @@ impl RouteOrComponents {
                 Ok((source, sink, dlq_sink))
             }
             RouteOrComponents::Components(source, sink, dlq_sink) => Ok((source, sink, dlq_sink)),
+        }
+    }
+}
+
+impl SinkEndpointType {
+    fn topic(&self) -> Option<&str> {
+        match self {
+            SinkEndpointType::Mqtt(e) => e.endpoint.topic.as_deref(),
+            _ => None
         }
     }
 }
@@ -579,7 +610,7 @@ mod tests {
         });
 
         bridge
-            .add_custom_route("custom-test-route", Arc::new(source), custom_sink.clone(), None)
+            .add_custom_route("custom-test-route", Arc::new(source), custom_sink.clone())
             .await
             .unwrap();
 

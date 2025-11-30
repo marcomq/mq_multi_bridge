@@ -1,0 +1,18 @@
+# Integration test configuration for NATS pipeline.
+log_level: "info"
+logger: "plain"
+sled_path: "/tmp/integration_test_db_nats"
+dedup_ttl_seconds: 60
+
+routes:
+  file_to_nats:
+    source:
+      file: { path: "/tmp/input.log" }
+    sink:
+      nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
+
+  nats_to_file:
+    source:
+      nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
+    sink:
+      file: { path: "/tmp/output_nats.log" }

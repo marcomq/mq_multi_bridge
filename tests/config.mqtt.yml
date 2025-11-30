@@ -1,0 +1,18 @@
+# Integration test configuration for MQTT pipeline.
+log_level: "info"
+logger: "plain"
+sled_path: "/tmp/integration_test_db_mqtt"
+dedup_ttl_seconds: 60
+
+routes:
+  file_to_mqtt:
+    source:
+      file: { path: "/tmp/input.log" }
+    sink:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+
+  mqtt_to_file:
+    source:
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+    sink:
+      file: { path: "/tmp/output_mqtt.log" }

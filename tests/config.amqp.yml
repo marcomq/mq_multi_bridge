@@ -1,0 +1,18 @@
+# Integration test configuration for AMQP pipeline.
+log_level: "info"
+logger: "plain"
+sled_path: "/tmp/integration_test_db_amqp"
+dedup_ttl_seconds: 60
+
+routes:
+  file_to_amqp:
+    source:
+      file: { path: "/tmp/input.log" }
+    sink:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
+
+  amqp_to_file:
+    source:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
+    sink:
+      file: { path: "/tmp/output_amqp.log" }

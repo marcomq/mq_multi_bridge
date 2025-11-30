@@ -17,17 +17,7 @@ pub struct MqttSink {
 }
 
 impl MqttSink {
-    pub async fn new(config: &MqttConfig, topic: &str) -> anyhow::Result<Self> {
-        let (client, mut eventloop) = create_client_and_eventloop(config).await?;
-        // We need to spawn a task to poll the eventloop for the sink client
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = eventloop.poll().await {
-                    error!("MQTT Sink eventloop error: {}", e);
-                    break;
-                }
-            }
-        });
+    pub fn new(client: AsyncClient, topic: &str) -> anyhow::Result<Self> {
         Ok(Self {
             client,
             topic: topic.to_string(),
