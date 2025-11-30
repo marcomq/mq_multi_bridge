@@ -11,7 +11,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 # Build the application in release mode
-RUN cargo build --release
+RUN cargo build --release-with-lto
 # Strip the binary to reduce its size
 RUN strip /usr/src/mq_multi_bridge/target/release/mq_multi_bridge
 

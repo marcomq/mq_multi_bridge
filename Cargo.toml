@@ -13,9 +13,14 @@ path = "src/main.rs"
 
 [profile.release]
 # Link-Time Optimization.
-lto = true
+# lto = true
 # Abort on panic to reduce binary size.
 panic = "abort"
+
+[profile.release-with-lto]
+inherits = "release"
+lto = true
+
 
 [dependencies]
 # Async runtime

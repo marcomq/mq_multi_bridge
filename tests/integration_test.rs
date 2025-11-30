@@ -130,7 +130,7 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     {
         f.config.path = output_path.to_str().unwrap().to_string();
     }
-
+    
     test_config
         .routes
         .insert(file_to_broker_route.to_string(), route_to_broker);
@@ -183,6 +183,89 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     );
     println!("Successfully verified {} route!", broker_name);
 }
+
+/// Helper function to run a single end-to-end performance test pipeline.
+async fn run_performance_pipeline_test(broker_name: &str, config_file_name: &str, num_messages: usize) {
+    let temp_dir = tempdir().unwrap();
+    let input_path = temp_dir.path().join("input.log");
+    let output_path = temp_dir
+        .path()
+        .join(format!("output_{}.log", broker_name.to_lowercase()));
+
+    // Generate a test file with unique messages
+    println!(
+        "[{}] Generating {} messages for performance test...",
+        broker_name, num_messages
+    );
+    let sent_message_ids = generate_test_file(&input_path, num_messages);
+    println!("[{}] Finished generating messages.", broker_name);
+
+    // Load the specific config for this test
+    let full_config_settings = config::Config::builder()
+        .add_source(ConfigFile::with_name(config_file_name).required(true))
+        .build()
+        .unwrap();
+    let full_config: AppConfig = full_config_settings.try_deserialize().unwrap();
+
+    let mut test_config = AppConfig::default();
+    test_config.log_level = "warn".to_string(); // Reduce logging for performance
+    test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
+
+    let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
+    let broker_to_file_route = format!("{}_to_file", broker_name.to_lowercase());
+    let mut route_to_broker = full_config.routes.get(&file_to_broker_route).unwrap().clone();
+    let mut route_from_broker = full_config.routes.get(&broker_to_file_route).unwrap().clone();
+
+    // Manually override the file paths
+    if let mq_multi_bridge::config::SourceEndpointType::File(f) = &mut route_to_broker.source.endpoint_type {
+        f.config.path = input_path.to_str().unwrap().to_string();
+    }
+    if let mq_multi_bridge::config::SinkEndpointType::File(f) = &mut route_from_broker.sink.endpoint_type {
+        f.config.path = output_path.to_str().unwrap().to_string();
+    }
+    
+    test_config.routes.insert(file_to_broker_route.to_string(), route_to_broker);
+    test_config.routes.insert(broker_to_file_route.to_string(), route_from_broker);
+
+    // Run the bridge and measure
+    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
+    bridge.initialize_from_config().await.unwrap();
+
+    println!("[{}] Starting performance test...", broker_name);
+    let start_time = std::time::Instant::now();
+
+    let bridge_task = tokio::spawn(bridge.run());
+
+    // Poll the output file until all messages are received or we time out.
+    let timeout = Duration::from_secs(60); // Increased timeout for potentially slower brokers
+    let mut received_ids = HashSet::new();
+    while start_time.elapsed() < timeout {
+        received_ids = read_output_file(&output_path);
+        if received_ids.len() == num_messages {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let duration = start_time.elapsed();
+    bridge_task.abort();
+
+    let messages_per_second = num_messages as f64 / duration.as_secs_f64();
+
+    println!("\n--- {} Performance Test Results ---", broker_name);
+    println!(
+        "Processed {} messages in {:.3} seconds.",
+        received_ids.len(),
+        duration.as_secs_f64()
+    );
+    println!("Rate: {:.2} messages/second", messages_per_second);
+    println!("--------------------------------\n");
+
+    // Verification
+    assert_eq!(received_ids.len(), num_messages, "Did not receive all messages for {}.", broker_name);
+    assert_eq!(sent_message_ids, received_ids, "Message IDs do not match for {}.", broker_name);
+    println!("[{}] Verification successful.", broker_name);
+}
+
 
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 
@@ -327,4 +410,118 @@ async fn test_all_pipelines_together() {
         );
         println!("Successfully verified {} route!", broker_name);
     }
+}
+
+// cargo test --release --test integration_test -- --ignored --nocapture --test-threads=1 --show-output
+#[tokio::test]
+#[ignore]
+async fn test_file_to_file_performance() {
+    // 1. Setup: Define test parameters and create temporary files.
+    let num_messages = 1_000; // Use a large number for a meaningful performance test.
+    let temp_dir = tempdir().unwrap();
+    let input_path = temp_dir.path().join("perf_input.log");
+    let output_path = temp_dir.path().join("perf_output.log");
+
+    println!(
+        "Generating {} messages for file-to-file performance test...",
+        num_messages
+    );
+    let sent_message_ids = generate_test_file(&input_path, num_messages);
+    println!("Finished generating messages.");
+
+    // 2. Configure the bridge for a simple file-to-file route.
+    let route = mq_multi_bridge::config::Route {
+        source: mq_multi_bridge::config::SourceEndpoint {
+            endpoint_type: mq_multi_bridge::config::SourceEndpointType::File(
+                mq_multi_bridge::config::FileSourceEndpoint {
+                    config: mq_multi_bridge::config::FileConfig {
+                        path: input_path.to_str().unwrap().to_string(),
+                    },
+                    endpoint: mq_multi_bridge::config::FileEndpoint {},
+                },
+            ),
+        },
+        sink: mq_multi_bridge::config::SinkEndpoint {
+            endpoint_type: mq_multi_bridge::config::SinkEndpointType::File(
+                mq_multi_bridge::config::FileSinkEndpoint {
+                    config: mq_multi_bridge::config::FileConfig {
+                        path: output_path.to_str().unwrap().to_string(),
+                    },
+                    endpoint: mq_multi_bridge::config::FileEndpoint {},
+                },
+            ),
+        },
+        dlq: None,
+        concurrency: Some(100), // Set concurrency for this test route
+    };
+
+    let mut test_config = AppConfig::default();
+    // Reduce logging verbosity to avoid impacting performance measurement.
+    test_config.log_level = "warn".to_string();
+    test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
+    test_config
+        .routes
+        .insert("file_to_file_perf".to_string(), route);
+
+    // 3. Run the bridge and measure execution time.
+    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
+    bridge.initialize_from_config().await.unwrap();
+
+    println!("Starting performance test...");
+    let start_time = std::time::Instant::now();
+
+    // The bridge will run and the file-to-file route will complete when the source file reaches EOF.
+    bridge.run().await.unwrap();
+
+    let duration = start_time.elapsed();
+    let messages_per_second = num_messages as f64 / duration.as_secs_f64();
+
+    println!("\n--- Performance Test Results ---");
+    println!(
+        "Processed {} messages in {:.3} seconds.",
+        num_messages,
+        duration.as_secs_f64()
+    );
+    println!("Rate: {:.2} messages/second", messages_per_second);
+    println!("--------------------------------\n");
+
+    // 4. Verification: Ensure all messages were transferred correctly.
+    let received_ids = read_output_file(&output_path);
+    assert_eq!(
+        received_ids.len(),
+        num_messages,
+        "Expected {} messages, but found {}.",
+        num_messages,
+        received_ids.len()
+    );
+    assert_eq!(sent_message_ids, received_ids, "Message IDs do not match.");
+    println!("Verification successful: All messages were transferred correctly.");
+}
+
+// --- Individual Broker Performance Tests ---
+
+const PERF_TEST_MESSAGE_COUNT: usize = 10_000;
+
+#[tokio::test]
+#[ignore]
+async fn test_kafka_performance_pipeline() {
+    run_performance_pipeline_test("Kafka", "tests/config.kafka", PERF_TEST_MESSAGE_COUNT).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nats_performance_pipeline() {
+    run_performance_pipeline_test("NATS", "tests/config.nats", PERF_TEST_MESSAGE_COUNT).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_amqp_performance_pipeline() {
+    run_performance_pipeline_test("AMQP", "tests/config.amqp", PERF_TEST_MESSAGE_COUNT).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_mqtt_performance_pipeline() {
+    run_performance_pipeline_test("MQTT", "tests/config.mqtt", PERF_TEST_MESSAGE_COUNT).await;
 }

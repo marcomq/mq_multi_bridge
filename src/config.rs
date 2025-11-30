@@ -211,6 +211,7 @@ pub struct Route {
     pub source: SourceEndpoint,
     pub sink: SinkEndpoint,
     pub dlq: Option<DlqConfig>,
+    pub concurrency: Option<usize>,
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
