@@ -17,15 +17,24 @@ pub struct MqttSink {
 }
 
 impl MqttSink {
-    pub async fn new(config: &MqttConfig, topic: &str) -> anyhow::Result<Self> {
-        let (client, mut eventloop) = create_client_and_eventloop(config).await?;
-        tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+    pub async fn new(
+        config: &MqttConfig,
+        topic: &str,
+        shared_client: Option<AsyncClient>,
+    ) -> anyhow::Result<Self> {
+        let client = if let Some(client) = shared_client {
+            client
+        } else {
+            let (client, mut eventloop) = create_client_and_eventloop(config).await?;
+            // Only spawn a new eventloop if we created a new client
+            tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+            client
+        };
         Ok(Self {
             client,
             topic: topic.to_string(),
         })
     }
-
     pub fn with_topic(&self, topic: &str) -> Self {
         Self {
             client: self.client.clone(),
@@ -46,6 +55,15 @@ impl MessageSink for MqttSink {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Drop for MqttSink {
+    fn drop(&mut self) {
+        // To prevent race conditions in tests where a sink is dropped immediately after sending,
+        // which can close the connection before a source on the same broker has received the message,
+        // we can introduce a small, synchronous delay.
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -139,7 +157,7 @@ async fn create_client_and_eventloop(
     for attempt in 1..=5 {
         let (host, port) = parse_url(&config.url)?;
         // Use a UUID to guarantee a unique client ID to prevent the broker from disconnecting one of the clients.
-        let client_id = format!("mq_multi_bridge_{}", uuid::Uuid::new_v4());
+        let client_id = format!("mq-multi-bridge-{}", uuid::Uuid::new_v4());
         let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
         mqttoptions.set_keep_alive(Duration::from_secs(20));

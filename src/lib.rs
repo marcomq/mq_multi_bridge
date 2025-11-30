@@ -236,7 +236,7 @@ async fn create_mqtt_sink(
     config: &MqttConfig,
     topic: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(MqttSink::new(config, topic).await?))
+    Ok(Arc::new(MqttSink::new(config, topic, None).await?))
 }
 async fn create_file_source(
     config: &FileConfig,
@@ -367,6 +367,13 @@ async fn run_bridge_instance(
                         // Special handling for FileSource: if it reaches EOF, we can gracefully shut down this bridge instance.
                         if e.to_string().contains("End of file reached") {
                             info!("Source file reached EOF. Shutting down this bridge instance.");
+                            // In a testing context, a file-based source might finish before other routes have had
+                            // time to initialize or process messages. This small delay ensures that sinks have
+                            // time to complete their work (e.g., publishing to a broker) before this task exits.
+                            // A 5-second delay should be sufficient for messages to be consumed in a test environment.
+                            // A more advanced solution might involve a signaling mechanism.
+                            // TODO: properly wait for sink completion instead of a fixed delay.
+                            sleep(Duration::from_secs(5)).await;
                             break; // Exit the loop
                         }
                         error!(error = %e, "Error receiving message from source. Reconnecting in 5s...");
@@ -376,11 +383,6 @@ async fn run_bridge_instance(
             }
         }
     }
-    // In a testing context, a file-based source might finish before other routes
-    // have had time to initialize or process messages. This small delay ensures that sinks
-    // have time to complete their work (e.g., publishing to a broker) before this task exits.
-    // TODO: properly wait for sink completion instead of a fixed delay.
-    sleep(Duration::from_secs(2)).await;
     info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
 }
 

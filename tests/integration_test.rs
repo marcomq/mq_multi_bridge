@@ -155,17 +155,24 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
 
     let bridge_task = tokio::spawn(bridge.run());
+    
+    // Poll the output file until all messages are received or we time out.
+    // This is more robust than a fixed sleep.
+    let timeout = Duration::from_secs(30);
+    let start_time = std::time::Instant::now();
+    let mut received_ids = HashSet::new();
 
-    // Give the bridge time to process all messages.
-    // The file source will error on EOF, and the bridge will log it and continue.
-    // This is a simple way to wait for completion in this test setup.
-    tokio::time::sleep(Duration::from_secs(25)).await;
+    while start_time.elapsed() < timeout {
+        received_ids = read_output_file(&output_path);
+        if received_ids.len() == num_messages {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
-    // The bridge task should have finished or be idle. We can drop the shutdown receiver.
-    drop(bridge_task);
+    bridge_task.abort(); // We have our results, no need to let the bridge run longer.
 
     // Verify the output file
-    let received_ids = read_output_file(&output_path);
     assert_eq!(
         received_ids.len(),
         num_messages,
