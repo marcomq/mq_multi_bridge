@@ -67,21 +67,11 @@ impl Bridge {
 
     /// Adds a route to the bridge, connecting a source to a sink.
     pub async fn add_route(&mut self, name: &str, route: &Route) -> Result<()> {
-        let source = create_source_from_route(name, &route.source).await?;
-        let sink = create_sink_from_route(name, &route.sink).await?;
-        let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
-            let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
-            Some(create_kafka_sink(&dlq_config.kafka.config, topic).await?)
-        } else {
-            None
-        };
-
+        // The creation logic is now moved inside run_bridge_instance to handle retries.
         let bridge_task = run_bridge_instance(
             name.to_string(),
-            source,
-            sink,
+            route.clone(),
             self.dedup_store.clone(),
-            dlq_sink,
             self.shutdown_rx.as_ref().map(|rx| rx.clone()),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
@@ -94,15 +84,12 @@ impl Bridge {
         route_name: &str,
         source: Arc<dyn MessageSource + Send + Sync>,
         sink: Arc<dyn MessageSink + Send + Sync>,
-        dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
     ) -> Result<()> {
         info!(route = %route_name, "Adding custom route");
         let bridge_task = run_bridge_instance(
             route_name.to_string(),
-            source,
-            sink,
+            (source, sink, None), // Wrap in a tuple to match the expected type
             self.dedup_store.clone(),
-            dlq_sink,
             self.shutdown_rx.as_ref().map(|rx| rx.clone()),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
@@ -276,13 +263,35 @@ async fn create_static_response_sink(
 #[instrument(skip_all, fields(bridge_id = %bridge_id))]
 async fn run_bridge_instance(
     bridge_id: String,
-    source: Arc<dyn MessageSource + Send + Sync>,
-    sink: Arc<dyn MessageSink + Send + Sync>,
+    route_or_components: impl Into<RouteOrComponents>,
     dedup_store: Arc<DeduplicationStore>, // Assuming this is still needed
-    dlq_sink: Option<Arc<dyn MessageSink + Send + Sync>>,
     mut shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 ) {
     trace!("Starting bridge id {}", bridge_id);
+
+    let route_or_components: RouteOrComponents = route_or_components.into();
+
+    // --- Resilient Initialization Loop ---
+    // This loop will patiently retry creating the source and sink until it succeeds or is shut down.
+    let (source, sink, dlq_sink) = loop {
+        tokio::select! {
+            biased;
+            _ = async { if let Some(rx) = &mut shutdown_rx { rx.changed().await.ok(); } else { futures::future::pending::<()>().await; } } => {
+                info!("Shutdown signal received during initialization, stopping.");
+                return;
+            }
+            result = route_or_components.clone().try_into_components(&bridge_id) => {
+                match result {
+                    Ok(components) => break components,
+                    Err(e) => {
+                        error!(error = %e, "Failed to initialize route components. Retrying in 5s...");
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        }
+    };
+
     loop {
         tokio::select! {
             // Biased ensures we check for shutdown first if both are ready
@@ -359,10 +368,47 @@ async fn run_bridge_instance(
             }
         }
     }
-    // TODO: Wait properly for Sinks before shutting down
-    sleep(Duration::from_secs(1)).await;
     info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
 }
+
+/// An enum to allow `run_bridge_instance` to accept either a full Route or pre-built components.
+#[derive(Clone)]
+enum RouteOrComponents {
+    Route(Route),
+    Components(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>),
+}
+
+impl From<Route> for RouteOrComponents {
+    fn from(route: Route) -> Self {
+        RouteOrComponents::Route(route)
+    }
+}
+
+impl From<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)> for RouteOrComponents {
+    fn from(components: (Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)) -> Self {
+        RouteOrComponents::Components(components.0, components.1, components.2)
+    }
+}
+
+impl RouteOrComponents {
+    async fn try_into_components(self, route_name: &str) -> Result<(Arc<dyn MessageSource + Send + Sync>, Arc<dyn MessageSink + Send + Sync>, Option<Arc<dyn MessageSink + Send + Sync>>)> {
+        match self {
+            RouteOrComponents::Route(route) => {
+                let source = create_source_from_route(route_name, &route.source).await?;
+                let sink = create_sink_from_route(route_name, &route.sink).await?;
+                let dlq_sink = if let Some(dlq_config) = route.dlq.clone() {
+                    let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");
+                    Some(create_kafka_sink(&dlq_config.kafka.config, topic).await?)
+                } else {
+                    None
+                };
+                Ok((source, sink, dlq_sink))
+            }
+            RouteOrComponents::Components(source, sink, dlq_sink) => Ok((source, sink, dlq_sink)),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

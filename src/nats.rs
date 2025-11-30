@@ -110,6 +110,8 @@ impl NatsSource {
                     subject.replace('.', "-")
                 )),
                 filter_subject: subject.to_string(),
+                // Ensure the consumer starts from the beginning of the stream.
+                deliver_policy: jetstream::consumer::DeliverPolicy::All,
                 ..Default::default()
             })
             .await?;
