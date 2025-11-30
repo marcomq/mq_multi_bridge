@@ -29,6 +29,12 @@ impl AmqpSink {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
 
+        // Ensure the queue exists before we try to publish to it. This is idempotent.
+        info!(queue = %routing_key, "Declaring AMQP queue in sink");
+        channel
+            .queue_declare(routing_key, QueueDeclareOptions::default(), FieldTable::default())
+            .await?;
+
         Ok(Self {
             channel,
             exchange: "".to_string(),    // Default exchange

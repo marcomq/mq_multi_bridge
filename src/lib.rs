@@ -32,6 +32,7 @@ use crate::sources::MessageSource;
 use crate::store::DeduplicationStore;
 use anyhow::{anyhow, Result};
 use metrics::{counter, histogram};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -39,7 +40,6 @@ use tracing::{error, info, instrument, trace, warn};
 
 pub struct Bridge {
     config: Config,
-    dedup_store: Arc<DeduplicationStore>,
     bridge_tasks: Vec<tokio::task::JoinHandle<()>>, // The task itself returns (), JoinHandle wraps it in a Result for panics
     shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 }
@@ -50,14 +50,8 @@ impl Bridge {
         config: Config,
         shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
     ) -> Result<Self> {
-        let dedup_store = Arc::new(DeduplicationStore::new(
-            &config.sled_path,
-            config.dedup_ttl_seconds,
-        )?);
-
         let bridge = Self {
             config,
-            dedup_store,
             bridge_tasks: Vec::new(),
             shutdown_rx,
         };
@@ -71,7 +65,7 @@ impl Bridge {
         let bridge_task = run_bridge_instance(
             name.to_string(),
             route.clone(),
-            self.dedup_store.clone(),
+            self.config.clone(),
             self.shutdown_rx.as_ref().map(|rx| rx.clone()),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
@@ -89,7 +83,7 @@ impl Bridge {
         let bridge_task = run_bridge_instance(
             route_name.to_string(),
             (source, sink, None), // Wrap in a tuple to match the expected type
-            self.dedup_store.clone(),
+            self.config.clone(),
             self.shutdown_rx.as_ref().map(|rx| rx.clone()),
         );
         self.bridge_tasks.push(tokio::spawn(bridge_task));
@@ -264,10 +258,16 @@ async fn create_static_response_sink(
 async fn run_bridge_instance(
     bridge_id: String,
     route_or_components: impl Into<RouteOrComponents>,
-    dedup_store: Arc<DeduplicationStore>, // Assuming this is still needed
+    config: Config,
     mut shutdown_rx: Option<tokio::sync::watch::Receiver<()>>,
 ) {
     trace!("Starting bridge id {}", bridge_id);
+
+    // Create a unique deduplication store for this specific bridge instance.
+    // This is crucial for tests to prevent routes from interfering with each other.
+    let db_path = Path::new(&config.sled_path).join(&bridge_id);
+    let dedup_store = Arc::new(DeduplicationStore::new(db_path, config.dedup_ttl_seconds)
+        .expect("Failed to create instance-specific deduplication store"));
 
     let route_or_components: RouteOrComponents = route_or_components.into();
 
