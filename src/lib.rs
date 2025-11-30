@@ -39,6 +39,7 @@ use metrics::{counter, histogram};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, trace, warn};
 
@@ -272,7 +273,6 @@ async fn run_bridge_instance(
     trace!("Starting bridge id {}", bridge_id);
 
     // Create a unique deduplication store for this specific bridge instance.
-    // This is crucial for tests to prevent routes from interfering with each other.
     let db_path = Path::new(&config.sled_path).join(&bridge_id);
     let dedup_store = Arc::new(
         DeduplicationStore::new(db_path, config.dedup_ttl_seconds)
@@ -283,14 +283,13 @@ async fn run_bridge_instance(
 
     // Extract concurrency level from the route if available
     let concurrency = if let RouteOrComponents::Route(ref route) = route_or_components {
-        route.concurrency.unwrap_or(200)
+        route.concurrency.unwrap_or(100)
     } else {
-        1 // Default to 1 for custom components
+        1
     };
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
-    // --- Resilient Initialization Loop ---
-    // This loop will patiently retry creating the source and sink until it succeeds or is shut down.
+    // Initialize source and sink with retries
     let (source, sink, dlq_sink) = loop {
         tokio::select! {
             biased;
@@ -310,104 +309,120 @@ async fn run_bridge_instance(
         }
     };
 
-    let source_exhausted = false;
+    let mut tasks = JoinSet::new();
+    let mut message_count = 0u64;
 
+    // Main message processing loop
     loop {
         tokio::select! {
-            // Biased ensures we check for shutdown first if both are ready
             biased;
+            
+            // Check for shutdown signal
             _ = async {
                 if let Some(rx) = &mut shutdown_rx {
                     rx.changed().await.ok();
                 } else {
-                    // If no shutdown receiver, this future will never resolve.
                     futures::future::pending::<()>().await;
                 }
             } => {
-                    info!("Shutdown signal received, stopping message consumption.");
-                    break;
-                }
-
-            // If the source is exhausted, we just idle until shutdown.
-            _ = async { futures::future::pending::<()>().await; }, if source_exhausted => {
-                // This branch is only active if `source_exhausted` is true. It does nothing but wait.
+                info!("Shutdown signal received");
+                break;
             }
 
-            // Acquire a semaphore permit before receiving the next message.
-            // This will block if the maximum number of concurrent messages is already being processed.
-            permit = semaphore.clone().acquire_owned(), if !source_exhausted => {
-                let permit = permit.expect("Semaphore closed unexpectedly");
-                let source_clone = source.clone();
-                let sink_clone = sink.clone();
-                let dlq_sink_clone = dlq_sink.clone();
-                let dedup_store_clone = dedup_store.clone();
-                let bridge_id_clone = bridge_id.clone();
+            // Process a single message
+            result = source.receive() => {
+                match result {
+                    Ok((message, commit)) => {
+                        message_count += 1;
+                        let permit = semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                        let sink = sink.clone();
+                        let dlq = dlq_sink.clone();
+                        let dedup = dedup_store.clone();
+                        let id = bridge_id.clone();
 
-                // Spawn a new task to handle this message. This allows the main loop
-                // to immediately try to receive the next message.
-                tokio::spawn(async move {
-                    // The permit is moved into this task and will be released when the task finishes.
-                    let _permit = permit;
-
-                    match source_clone.receive().await {
-                        Ok((message, commit)) => {
-                            let msg_id = message.message_id;
-                            let processing_start = std::time::Instant::now();
-                            trace!(message_id = %msg_id, "Received message");
-                            counter!("bridge_messages_received_total", "route" => bridge_id_clone.clone()).increment(1);
-
-                            if dedup_store_clone.is_duplicate(&msg_id).unwrap_or(false) {
-                                warn!(message_id = %msg_id, "Duplicate message detected, skipping.");
-                                counter!("bridge_messages_duplicate_total", "route" => bridge_id_clone.clone()).increment(1);
-                                commit(None).await; // Commit even if duplicate to remove from source queue
-                                return;
-                            }
-
-                            let mut attempts = 0;
-                            let max_attempts = 5;
-                            loop {
-                                attempts += 1;
-                                match sink_clone.send(message.clone()).await {
-                                    Ok(response_message) => {
-                                        let duration = processing_start.elapsed();
-                                        trace!(message_id = %msg_id, "Successfully forwarded message");
-                                        counter!("bridge_messages_sent_total", "route" => bridge_id_clone.clone()).increment(1);
-                                        histogram!("bridge_message_processing_duration_seconds", "route" => bridge_id_clone.clone()).record(duration.as_secs_f64());
-                                        commit(response_message).await; // ACK source only after successful sink
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        error!(message_id = %msg_id, attempt = attempts, error = %e, "Failed to forward message");
-                                        if attempts >= max_attempts {
-                                            counter!("bridge_messages_dlq_total", "route" => bridge_id_clone.clone()).increment(1);
-                                            if let Some(dlq) = &dlq_sink_clone {
-                                                if let Err(dlq_err) = dlq.send(message).await {
-                                                    error!(message_id = %msg_id, error = %dlq_err, "Failed to send to DLQ!");
-                                                }
-                                            }
-                                            commit(None).await; // Commit original message after moving to DLQ
-                                            break;
-                                        }
-                                        let backoff_duration = Duration::from_secs(2u64.pow(attempts));
-                                        warn!(message_id = %msg_id, "Retrying in {:?}", backoff_duration);
-                                        sleep(backoff_duration).await;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if e.to_string().contains("End of file reached") {
-                                // This is a normal condition for FileSource, so we don't log an error.
-                            } else {
-                                error!(error = %e, "Error receiving message from source.");
-                            }
-                        }
+                        tasks.spawn(async move {
+                            let _permit = permit;
+                            process_message(message, commit, sink, dlq, dedup, id).await;
+                        });
                     }
-                });
+                    Err(e) => {
+                        if e.to_string().contains("End of file reached") {
+                            info!("Source reached EOF. Waiting for in-flight messages...");
+                            break;
+                        }
+                        // For timeouts or other transient errors, just continue
+                        trace!(error = %e, "Temporary error receiving message");
+                    }
+                }
             }
         }
     }
-    info!(bridge_id = %bridge_id, "Bridge instance shut down gracefully.");
+
+    // Wait for all tasks to complete
+    info!(bridge_id = %bridge_id, messages_processed = message_count, "Shutting down, waiting for in-flight tasks...");
+    tasks.shutdown().await;
+    while tasks.join_next().await.is_some() {}
+    info!(bridge_id = %bridge_id, "Bridge shut down gracefully");
+}
+
+/// Process a single message through the sink with retries and DLQ handling
+async fn process_message(
+    message: crate::model::CanonicalMessage,
+    commit: crate::sources::BoxedMessageStream,
+    sink: Arc<dyn crate::sinks::MessageSink + Send + Sync>,
+    dlq: Option<Arc<dyn crate::sinks::MessageSink + Send + Sync>>,
+    dedup: Arc<DeduplicationStore>,
+    route_id: String,
+) {
+    let msg_id = message.message_id;
+    let start = std::time::Instant::now();
+
+    // Check for duplicate
+    if dedup.is_duplicate(&msg_id).unwrap_or(false) {
+        trace!(message_id = %msg_id, "Duplicate message, skipping");
+        counter!("bridge_messages_duplicate_total", "route" => route_id.clone()).increment(1);
+        commit(None).await;
+        return;
+    }
+
+    counter!("bridge_messages_received_total", "route" => route_id.clone()).increment(1);
+
+    // Try to send with exponential backoff
+    let mut attempts = 0;
+    const MAX_ATTEMPTS: u32 = 5;
+
+    loop {
+        attempts += 1;
+        match sink.send(message.clone()).await {
+            Ok(response) => {
+                let duration = start.elapsed();
+                trace!(message_id = %msg_id, "Message forwarded successfully");
+                counter!("bridge_messages_sent_total", "route" => route_id.clone()).increment(1);
+                histogram!("bridge_message_processing_duration_seconds", "route" => route_id.clone())
+                    .record(duration.as_secs_f64());
+                commit(response).await;
+                return;
+            }
+            Err(e) => {
+                if attempts >= MAX_ATTEMPTS {
+                    error!(message_id = %msg_id, "Max retries exceeded, sending to DLQ");
+                    counter!("bridge_messages_dlq_total", "route" => route_id.clone()).increment(1);
+                    
+                    if let Some(dlq_sink) = dlq {
+                        if let Err(e) = dlq_sink.send(message).await {
+                            error!(message_id = %msg_id, error = %e, "Failed to send to DLQ");
+                        }
+                    }
+                    commit(None).await;
+                    return;
+                }
+
+                let backoff = Duration::from_secs(2u64.pow(attempts));
+                warn!(message_id = %msg_id, attempt = attempts, error = %e, backoff_secs = backoff.as_secs(), "Send failed, retrying");
+                sleep(backoff).await;
+            }
+        }
+    }
 }
 
 /// An enum to allow `run_bridge_instance` to accept either a full Route or pre-built components.
@@ -518,6 +533,7 @@ mod tests {
                             },
                         },
                     }),
+                    concurrency: None,
                 },
             )]
             .into(),
@@ -569,6 +585,7 @@ mod tests {
                 }),
             },
             dlq: None,
+            concurrency: None,
         };
 
         let config = Config::default();

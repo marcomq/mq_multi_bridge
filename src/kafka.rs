@@ -4,7 +4,7 @@ use crate::sinks::MessageSink;
 use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -25,7 +25,14 @@ impl KafkaSink {
         let mut client_config = ClientConfig::new();
         client_config
             .set("bootstrap.servers", &config.brokers)
-            .set("message.timeout.ms", "5000");
+            // --- Performance Tuning ---
+            .set("linger.ms", "100") // Wait 100ms to batch messages for reliability
+            .set("batch.num.messages", "10000") // Max messages per batch.
+            .set("compression.type", "lz4") // Efficient compression.
+            // --- Reliability ---
+            .set("acks", "all") // Wait for all in-sync replicas (safer)
+            .set("retries", "3") // Retry up to 3 times
+            .set("request.timeout.ms", "30000"); // 30 second timeout
 
         if config.tls.required {
             client_config.set("security.protocol", "ssl");
@@ -65,6 +72,19 @@ impl KafkaSink {
     }
 }
 
+impl Drop for KafkaSink {
+    fn drop(&mut self) {
+        // When the sink is dropped, we need to make sure all buffered messages are sent.
+        // `flush` is async, but `drop` is sync. The recommended way is to block on the future.
+        // This is especially important in tests or short-lived processes.
+        info!(
+            topic = %self.topic,
+            "Flushing Kafka producer before dropping sink..."
+        );
+        let _ = self.producer.flush(Duration::from_secs(10)); // Block for up to 10s
+    }
+}
+
 #[async_trait]
 impl MessageSink for KafkaSink {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
@@ -99,6 +119,8 @@ impl KafkaSource {
             .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
+            // --- Performance Tuning for Consumers ---
+            .set("fetch.min.bytes", "1") // Start fetching immediately
             .set("socket.connection.setup.timeout.ms", "30000"); // 30 seconds
 
         if config.tls.required {
