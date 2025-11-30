@@ -20,16 +20,10 @@ impl MqttSink {
     pub async fn new(
         config: &MqttConfig,
         topic: &str,
-        shared_client: Option<AsyncClient>,
+        bridge_id: &str,
     ) -> anyhow::Result<Self> {
-        let client = if let Some(client) = shared_client {
-            client
-        } else {
-            let (client, mut eventloop) = create_client_and_eventloop(config).await?;
-            // Only spawn a new eventloop if we created a new client
-            tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
-            client
-        };
+        let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
+        tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
         Ok(Self {
             client,
             topic: topic.to_string(),
@@ -58,15 +52,6 @@ impl MessageSink for MqttSink {
     }
 }
 
-impl Drop for MqttSink {
-    fn drop(&mut self) {
-        // To prevent race conditions in tests where a sink is dropped immediately after sending,
-        // which can close the connection before a source on the same broker has received the message,
-        // we can introduce a small, synchronous delay.
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 pub struct MqttSource {
     client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
@@ -74,8 +59,8 @@ pub struct MqttSource {
 }
 
 impl MqttSource {
-    pub async fn new(config: &MqttConfig, topic: &str) -> anyhow::Result<Self> {
-        let (client, mut eventloop) = create_client_and_eventloop(config).await?;
+    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
+        let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
         let (message_tx, message_rx) = mpsc::channel(10);
 
         // Spawn a dedicated task to poll the eventloop
@@ -152,12 +137,13 @@ impl MessageSource for MqttSource {
 
 async fn create_client_and_eventloop(
     config: &MqttConfig,
+    bridge_id: &str,
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
     let mut last_error: Option<ClientError> = None;
     for attempt in 1..=5 {
         let (host, port) = parse_url(&config.url)?;
-        // Use a UUID to guarantee a unique client ID to prevent the broker from disconnecting one of the clients.
-        let client_id = format!("mq-multi-bridge-{}", uuid::Uuid::new_v4());
+        // Use a unique client ID based on the bridge_id to prevent collisions.
+        let client_id = format!("mq-multi-bridge-{}", bridge_id);
         let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
         mqttoptions.set_keep_alive(Duration::from_secs(20));

@@ -10,7 +10,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
 use std::sync::Mutex;
-use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -26,22 +25,18 @@ struct DockerCompose {
 impl DockerCompose {
     fn up() {
         println!("Starting docker-compose services...");
-        let _child = Command::new("docker-compose")
+        let status = Command::new("docker-compose")
             .arg("-f")
             .arg("tests/docker-compose.integration.yml")
             .arg("up")
             .arg("-d") // Detached mode
+            .arg("--wait") // Wait for services to be healthy
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
-            .spawn()
+            .status()
             .expect("Failed to start docker-compose");
 
-        // We don't wait for the command to finish, but we can check its status later if needed.
-        // For now, we just sleep to let services initialize.
-
-        // Give services time to initialize
-        println!("Waiting for services to initialize...");
-        thread::sleep(Duration::from_secs(15)); // May need adjustment
+        assert!(status.success(), "docker-compose up --wait failed");
         println!("Services should be up.");
     }
 
@@ -155,7 +150,7 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
 
     let bridge_task = tokio::spawn(bridge.run());
-    
+
     // Poll the output file until all messages are received or we time out.
     // This is more robust than a fixed sleep.
     let timeout = Duration::from_secs(30);

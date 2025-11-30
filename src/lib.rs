@@ -141,7 +141,7 @@ async fn create_source_from_route(
         }
         SourceEndpointType::Mqtt(MqttSourceEndpoint { config, endpoint }) => {
             let topic = endpoint.topic.as_deref().unwrap_or(route_name);
-            create_mqtt_source(config, topic).await
+            create_mqtt_source(config, topic, route_name).await
         }
         SourceEndpointType::File(FileSourceEndpoint { config, .. }) => {
             create_file_source(config).await
@@ -172,7 +172,7 @@ async fn create_sink_from_route(
         }
         SinkEndpointType::Mqtt(MqttSinkEndpoint { config, endpoint }) => {
             let topic = endpoint.topic.as_deref().unwrap_or(route_name);
-            create_mqtt_sink(config, topic).await
+            create_mqtt_sink(config, topic, route_name).await
         }
         SinkEndpointType::File(FileSinkEndpoint { config, .. }) => create_file_sink(config).await,
         SinkEndpointType::Http(HttpSinkEndpoint { config, endpoint }) => {
@@ -229,14 +229,16 @@ async fn create_amqp_sink(
 async fn create_mqtt_source(
     config: &MqttConfig,
     topic: &str,
+    bridge_id: &str,
 ) -> anyhow::Result<Arc<dyn MessageSource + Send + Sync>> {
-    Ok(Arc::new(MqttSource::new(config, topic).await?))
+    Ok(Arc::new(MqttSource::new(config, topic, bridge_id).await?))
 }
 async fn create_mqtt_sink(
     config: &MqttConfig,
     topic: &str,
+    bridge_id: &str,
 ) -> anyhow::Result<Arc<dyn MessageSink + Send + Sync>> {
-    Ok(Arc::new(MqttSink::new(config, topic, None).await?))
+    Ok(Arc::new(MqttSink::new(config, topic, bridge_id).await?))
 }
 async fn create_file_source(
     config: &FileConfig,
@@ -300,6 +302,8 @@ async fn run_bridge_instance(
         }
     };
 
+    let mut source_exhausted = false;
+
     loop {
         tokio::select! {
             // Biased ensures we check for shutdown first if both are ready
@@ -315,7 +319,13 @@ async fn run_bridge_instance(
                     info!("Shutdown signal received, stopping message consumption.");
                     break;
                 }
-            result = source.receive() => {
+
+            // If the source is exhausted, we just idle until shutdown.
+            _ = async { futures::future::pending::<()>().await; }, if source_exhausted => {
+                // This branch is only active if `source_exhausted` is true. It does nothing but wait.
+            }
+
+            result = source.receive(), if !source_exhausted => {
                 match result {
                     Ok((message, commit)) => {
                         let msg_id = message.message_id;
@@ -366,15 +376,9 @@ async fn run_bridge_instance(
                     Err(e) => {
                         // Special handling for FileSource: if it reaches EOF, we can gracefully shut down this bridge instance.
                         if e.to_string().contains("End of file reached") {
-                            info!("Source file reached EOF. Shutting down this bridge instance.");
-                            // In a testing context, a file-based source might finish before other routes have had
-                            // time to initialize or process messages. This small delay ensures that sinks have
-                            // time to complete their work (e.g., publishing to a broker) before this task exits.
-                            // A 5-second delay should be sufficient for messages to be consumed in a test environment.
-                            // A more advanced solution might involve a signaling mechanism.
-                            // TODO: properly wait for sink completion instead of a fixed delay.
-                            sleep(Duration::from_secs(5)).await;
-                            break; // Exit the loop
+                            info!("Source file reached EOF. This bridge instance will now idle until shutdown.");
+                            source_exhausted = true;
+                            continue; // Go to the top of the loop to hit the now-disabled source branch.
                         }
                         error!(error = %e, "Error receiving message from source. Reconnecting in 5s...");
                         sleep(Duration::from_secs(5)).await;
