@@ -96,28 +96,20 @@ impl NatsConsumer {
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
-        // Create a new consumer specifically for the given subject.
-        // Retry getting the stream to handle race conditions where the sink is still creating it.
-        let mut stream = None;
-        for attempt in 0..20 {
-            match jetstream.get_stream(stream_name).await {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(_) => {
-                    if attempt < 19 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            }
-        }
-        let stream = stream.ok_or_else(|| {
-            anyhow!(
-                "Failed to get NATS stream '{}' after multiple retries",
-                stream_name
-            )
-        })?;
+        // Also ensure the stream exists on the consumer side. This is idempotent and helps
+        // prevent race conditions where the consumer starts before the publisher has created the stream.
+        jetstream
+            .get_or_create_stream(stream::Config {
+                name: stream_name.to_string(),
+                subjects: vec![subject.to_string(), format!("{}.>", subject)],
+                ..Default::default()
+            })
+            .await?;
+
+        // Now that we've ensured the stream exists, we can get a handle to it.
+        // This is more direct and less prone to race conditions than the previous retry loop.
+        let stream = jetstream.get_stream(stream_name).await?;
+
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject

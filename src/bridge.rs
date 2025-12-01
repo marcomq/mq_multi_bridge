@@ -6,6 +6,7 @@
 use crate::config::Config;
 use crate::route_runner::RouteRunner;
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
@@ -39,12 +40,14 @@ impl Bridge {
         tokio::spawn(async move {
             info!("Bridge starting up...");
             let mut route_tasks = JoinSet::new();
+            let num_routes = self.config.routes.len();
+            let barrier = Arc::new(tokio::sync::Barrier::new(num_routes));
 
             for (name, route) in self.config.routes.iter() {
                 let route_runner = RouteRunner::new(
                     name.clone(),
                     route.clone(),
-                    self.config.clone(),
+                    barrier.clone(),
                     self.shutdown_rx.clone(),
                 );
                 route_tasks.spawn(route_runner.run());

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, instrument};
 
 /// A sink that writes messages to a file, one per line.
 pub struct FilePublisher {
@@ -104,12 +104,14 @@ impl Clone for FileConsumer {
 
 #[async_trait]
 impl MessageConsumer for FileConsumer {
+    #[instrument(skip(self), fields(path = %self.path), err)]
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut reader = self.reader.lock().await;
         let mut line = String::new();
 
         let bytes_read = reader.read_line(&mut line).await?;
         if bytes_read == 0 {
+            info!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 

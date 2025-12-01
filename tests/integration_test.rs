@@ -212,7 +212,7 @@ async fn run_performance_pipeline_test(
     let full_config: AppConfig = full_config_settings.try_deserialize().unwrap();
 
     let mut test_config = AppConfig::default();
-    test_config.log_level = "warn".to_string(); // Reduce logging for performance
+    test_config.log_level = "info".to_string(); // Revert to info level
     test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
 
     let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
