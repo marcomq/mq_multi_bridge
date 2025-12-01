@@ -17,8 +17,8 @@ use crate::config::{
 use crate::consumers::MessageConsumer;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Result};
-use tracing::info;
 use std::sync::Arc;
+use tracing::info;
 
 /// Creates a `MessageConsumer` based on the route's "in" configuration.
 pub async fn create_consumer_from_route(
@@ -114,7 +114,10 @@ pub async fn create_publisher_from_route(
 }
 
 /// Creates a `MessagePublisher` for the DLQ if configured.
-pub async fn create_dlq_from_route(route: &Route, name: &str) -> Result<Option<Arc<dyn MessagePublisher>>> {
+pub async fn create_dlq_from_route(
+    route: &Route,
+    name: &str,
+) -> Result<Option<Arc<dyn MessagePublisher>>> {
     if let Some(dlq_config) = &route.dlq {
         info!("DLQ configured for route {}", name);
         let topic = dlq_config.kafka.endpoint.topic.as_deref().unwrap_or("dlq");

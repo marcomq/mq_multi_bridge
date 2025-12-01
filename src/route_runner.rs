@@ -13,7 +13,7 @@ use metrics::{counter, histogram};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Barrier, Mutex};
+use tokio::sync::{mpsc, watch, Barrier, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, trace};
@@ -159,7 +159,10 @@ impl RouteRunner {
         let (tx, rx) = mpsc::channel(concurrency * 2);
         let rx = Arc::new(Mutex::new(rx)); // Wrap receiver in Arc<Mutex> for sharing
         let mut tasks = JoinSet::new();
-
+        // Semaphore to signal available messages in the channel, preventing lock contention.
+        // It starts with 0 permits.
+        let semaphore = Arc::new(Semaphore::new(0));
+        let semaphore_clone = semaphore.clone();
         // --- Producer Task ---
         // This task's only job is to receive messages and send them to the processing channel.
         let mut producer_shutdown_rx = self.shutdown_rx.clone();
@@ -176,9 +179,12 @@ impl RouteRunner {
                                 let msg_id = message_data.0.message_id;
                                 trace!(%msg_id, "Message received from source consumer, queuing for processing.");
                                 if tx.send(message_data).await.is_err() {
+                                    // If the send fails, the channel is closed, so we stop.
+                                    // No need to add a permit here.
                                     info!("Processing channel closed. Stopping producer.");
                                     break;
                                 }
+                                semaphore_clone.add_permits(1); // Signal that a message is available
                             }
                             Err(e) => {
                                 if e.to_string().contains("End of file") {
@@ -203,16 +209,32 @@ impl RouteRunner {
             let publisher = publisher.clone();
             let dlq_publisher = dlq_publisher.clone();
             let rx = rx.clone();
+            let semaphore = semaphore.clone();
             let mut consumer_shutdown_rx = consumer_shutdown_rx.clone();
 
             tasks.spawn(async move {
                 // Each worker task runs a loop, processing messages until the channel is closed.
-                while let Some((message, commit_fn)) = rx.lock().await.recv().await {
-                    // Before processing, check if a shutdown has been requested.
-                    if consumer_shutdown_rx.has_changed().unwrap_or(false) {
-                        info!("Shutdown signal received in worker. Exiting.");
+                loop {
+                    // Wait for a permit, which signals a message is available.
+                    // This is more efficient than constantly locking the mutex.
+                    let permit = tokio::select! {
+                        biased;
+                        _ = consumer_shutdown_rx.changed() => {
+                            info!("Shutdown signal received in worker. Exiting.");
+                            break;
+                        }
+                        permit = semaphore.acquire() => permit,
+                    };
+                    let Ok(_permit) = permit else {
                         break;
-                    }
+                    };
+
+                    // Now that we have a permit, we can lock and receive the message.
+                    // This should not block for long, as the permit guarantees a message is ready.
+                    let Some((message, commit_fn)) = rx.lock().await.recv().await else {
+                        // This can happen if the channel closes after a permit is acquired.
+                        break;
+                    };
                     trace!(msg_id = %message.message_id, "Worker picked up message from channel.");
 
                     let msg_id = message.message_id;

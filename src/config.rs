@@ -467,6 +467,5 @@ routes:
         } else {
             panic!("Expected Kafka source endpoint");
         }
-
     }
 }
