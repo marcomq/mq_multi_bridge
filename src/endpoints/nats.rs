@@ -1,6 +1,6 @@
 use crate::config::NatsConfig;
-use crate::model::CanonicalMessage;
 use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_nats::{jetstream, jetstream::stream, ConnectOptions};

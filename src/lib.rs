@@ -3,9 +3,13 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
+pub mod bridge;
 pub mod config;
 pub mod consumers;
+pub mod deduplication;
 pub mod endpoints;
 pub mod model;
 pub mod publishers;
-pub mod deduplication;
+mod route_runner;
+
+pub use bridge::Bridge;

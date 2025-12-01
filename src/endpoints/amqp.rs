@@ -1,6 +1,6 @@
 use crate::config::AmqpConfig;
-use crate::model::CanonicalMessage;
 use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;

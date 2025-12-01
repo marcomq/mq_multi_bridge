@@ -143,13 +143,20 @@ pub struct StaticResponseEndpoint {
     pub content: String,
 }
 
-
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub struct PublisherEndpoint {
     // pub connection: String,
     #[serde(flatten)]
     pub endpoint_type: PublisherEndpointType,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub struct ConsumerEndpoint {
+    // pub connection: String,
+    #[serde(flatten)]
+    pub endpoint_type: ConsumerEndpointType,
 }
 
 pub fn load_config() -> Result<Config, config::ConfigError> {
@@ -459,30 +466,30 @@ routes:
             assert_eq!(k.endpoint.topic.as_deref(), Some("env-in-topic"));
         } else {
             panic!("Expected Kafka source endpoint");
-    }
+        }
 
-    // This macro helps create small, focused tests for each configuration type.
-    macro_rules! test_config_deserialization {
-        ($test_name:ident, $yaml:expr, $struct_type:ty) => {
-            #[test]
-            fn $test_name() {
-                let yaml_config = $yaml;
-                let result: Result<$struct_type, _> = serde_yaml::from_str(yaml_config);
-                assert!(
-                    result.is_ok(),
-                    "Failed to deserialize for {}: {:?}",
-                    stringify!($test_name),
-                    result.err()
-                );
-            }
-        };
-    }
+        // This macro helps create small, focused tests for each configuration type.
+        macro_rules! test_config_deserialization {
+            ($test_name:ident, $yaml:expr, $struct_type:ty) => {
+                #[test]
+                fn $test_name() {
+                    let yaml_config = $yaml;
+                    let result: Result<$struct_type, _> = serde_yaml::from_str(yaml_config);
+                    assert!(
+                        result.is_ok(),
+                        "Failed to deserialize for {}: {:?}",
+                        stringify!($test_name),
+                        result.err()
+                    );
+                }
+            };
+        }
 
-    // --- Test individual route configurations ---
+        // --- Test individual route configurations ---
 
-    test_config_deserialization!(
-        test_kafka_route_config,
-        r#"
+        test_config_deserialization!(
+            test_kafka_route_config,
+            r#"
         in:
           kafka:
             brokers: "localhost:9092"
@@ -491,12 +498,12 @@ routes:
           file:
             path: "/dev/null"
         "#,
-        Route
-    );
+            Route
+        );
 
-    test_config_deserialization!(
-        test_nats_route_config,
-        r#"
+        test_config_deserialization!(
+            test_nats_route_config,
+            r#"
         in:
           nats:
             url: "localhost:4222"
@@ -506,12 +513,12 @@ routes:
           file:
             path: "/dev/null"
         "#,
-        Route
-    );
+            Route
+        );
 
-    test_config_deserialization!(
-        test_amqp_route_config,
-        r#"
+        test_config_deserialization!(
+            test_amqp_route_config,
+            r#"
         in:
           amqp:
             url: "amqp://guest:guest@localhost:5672"
@@ -520,15 +527,16 @@ routes:
           file:
             path: "/dev/null"
         "#,
-        Route
-    );
+            Route
+        );
 
-    test_config_deserialization!(
-        test_http_source_route_config,
-        r#"
+        test_config_deserialization!(
+            test_http_source_route_config,
+            r#"
         in: { http: { listen_address: "0.0.0.0:8080" } }
         out: { file: { path: "/dev/null" } }
         "#,
-        Route
-    );
+            Route
+        );
+    }
 }

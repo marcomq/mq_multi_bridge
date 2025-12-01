@@ -182,7 +182,7 @@ Beyond running as a standalone application, mq-multi-bridge can be used as a lib
 ### 1. Implement a Custom Source or Sink 
 You can create your own sources and sinks by implementing the MessageSource and MessageSink traits. 
 ```rust 
-use mq_multi_bridge::sinks::MessagePublisher;
+use mq_multi_bridge::MessagePublisher;
 use mq_multi_bridge::model::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -210,7 +210,7 @@ Use the Bridge struct to configure your application. You can mix and match conne
 ```rust,ignore
 use mq_multi_bridge::Bridge;
 use mq_multi_bridge::config::{load_config, Config};
-use mq_multi_bridge::sources::MessageConsumer;
+use mq_multi_bridge::MessageConsumer;
 use mq_multi_bridge::http::HttpConsumer; // Using a built-in source for the example
 use std::sync::Arc;
 

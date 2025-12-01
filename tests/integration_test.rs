@@ -14,9 +14,9 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 struct DockerCompose {
     // No longer need to hold the child process, as we'll manage it globally.
@@ -130,7 +130,7 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     {
         f.config.path = output_path.to_str().unwrap().to_string();
     }
-    
+
     test_config
         .routes
         .insert(file_to_broker_route.to_string(), route_to_broker);
@@ -185,7 +185,11 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
 }
 
 /// Helper function to run a single end-to-end performance test pipeline.
-async fn run_performance_pipeline_test(broker_name: &str, config_file_name: &str, num_messages: usize) {
+async fn run_performance_pipeline_test(
+    broker_name: &str,
+    config_file_name: &str,
+    num_messages: usize,
+) {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.log");
     let output_path = temp_dir
@@ -213,19 +217,35 @@ async fn run_performance_pipeline_test(broker_name: &str, config_file_name: &str
 
     let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
     let broker_to_file_route = format!("{}_to_file", broker_name.to_lowercase());
-    let mut route_to_broker = full_config.routes.get(&file_to_broker_route).unwrap().clone();
-    let mut route_from_broker = full_config.routes.get(&broker_to_file_route).unwrap().clone();
+    let mut route_to_broker = full_config
+        .routes
+        .get(&file_to_broker_route)
+        .unwrap()
+        .clone();
+    let mut route_from_broker = full_config
+        .routes
+        .get(&broker_to_file_route)
+        .unwrap()
+        .clone();
 
     // Manually override the file paths
-    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) = &mut route_to_broker.r#in.endpoint_type {
+    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
+        &mut route_to_broker.r#in.endpoint_type
+    {
         f.config.path = input_path.to_str().unwrap().to_string();
     }
-    if let mq_multi_bridge::config::PublisherEndpointType::File(f) = &mut route_from_broker.out.endpoint_type {
+    if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
+        &mut route_from_broker.out.endpoint_type
+    {
         f.config.path = output_path.to_str().unwrap().to_string();
     }
-    
-    test_config.routes.insert(file_to_broker_route.to_string(), route_to_broker);
-    test_config.routes.insert(broker_to_file_route.to_string(), route_from_broker);
+
+    test_config
+        .routes
+        .insert(file_to_broker_route.to_string(), route_to_broker);
+    test_config
+        .routes
+        .insert(broker_to_file_route.to_string(), route_from_broker);
 
     // Run the bridge and measure
     let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
@@ -261,11 +281,19 @@ async fn run_performance_pipeline_test(broker_name: &str, config_file_name: &str
     println!("--------------------------------\n");
 
     // Verification
-    assert_eq!(received_ids.len(), num_messages, "Did not receive all messages for {}.", broker_name);
-    assert_eq!(sent_message_ids, received_ids, "Message IDs do not match for {}.", broker_name);
+    assert_eq!(
+        received_ids.len(),
+        num_messages,
+        "Did not receive all messages for {}.",
+        broker_name
+    );
+    assert_eq!(
+        sent_message_ids, received_ids,
+        "Message IDs do not match for {}.",
+        broker_name
+    );
     println!("[{}] Verification successful.", broker_name);
 }
-
 
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 
@@ -369,7 +397,9 @@ async fn test_all_pipelines_together() {
             f.config.path = input_path.to_str().unwrap().to_string();
         }
         // Override sink file paths
-        if let mq_multi_bridge::config::PublisherEndpointType::File(f) = &mut route.out.endpoint_type {
+        if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
+            &mut route.out.endpoint_type
+        {
             for (broker_name, path) in &output_paths {
                 if route_name.contains(broker_name) {
                     f.config.path = path.to_str().unwrap().to_string();

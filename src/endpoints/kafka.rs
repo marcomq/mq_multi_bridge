@@ -1,6 +1,6 @@
 use crate::config::KafkaConfig;
-use crate::model::CanonicalMessage;
 use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -71,19 +71,24 @@ impl KafkaPublisher {
         // It's okay if the topic already exists.
         for result in results {
             match result {
-                Ok(topic_name) => info!(topic = %topic_name, "Kafka topic created or already exists"),
+                Ok(topic_name) => {
+                    info!(topic = %topic_name, "Kafka topic created or already exists")
+                }
                 Err((topic_name, error_code)) => {
                     if error_code != RDKafkaErrorCode::TopicAlreadyExists {
                         return Err(anyhow!(
                             "Failed to create Kafka topic '{}': {}",
-                            topic_name, error_code
+                            topic_name,
+                            error_code
                         ));
                     }
                 }
             }
         }
 
-        let producer: FutureProducer = client_config.create().context("Failed to create Kafka producer")?;
+        let producer: FutureProducer = client_config
+            .create()
+            .context("Failed to create Kafka producer")?;
         Ok(Self {
             producer,
             topic: topic.to_string(),
@@ -117,7 +122,7 @@ impl MessagePublisher for KafkaPublisher {
         let payload = serde_json::to_string(&message)?;
         let key: String = message.message_id.to_string();
         let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
-        
+
         // "Fire and forget" send. The `FutureProducer` will handle batching and sending in the background.
         // We don't await the result here to avoid blocking and to allow for high throughput.
         // The producer is configured with retries, and the `Drop` impl handles flushing.

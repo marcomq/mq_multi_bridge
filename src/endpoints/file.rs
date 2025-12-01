@@ -3,8 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
 use crate::config::FileConfig;
-use crate::model::CanonicalMessage;
 use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;

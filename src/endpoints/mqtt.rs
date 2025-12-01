@@ -1,6 +1,6 @@
 use crate::config::MqttConfig;
-use crate::model::CanonicalMessage;
 use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -18,14 +18,9 @@ pub struct MqttPublisher {
 }
 
 impl MqttPublisher {
-    pub async fn new(
-        config: &MqttConfig,
-        topic: &str,
-        bridge_id: &str,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
         let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
-        let eventloop_handle =
-            tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+        let eventloop_handle = tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
         Ok(Self {
             client,
             topic: topic.to_string(),
