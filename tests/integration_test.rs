@@ -1,4 +1,5 @@
-// cargo test --test integration_test -- --ignored --nocapture --test-threads=1 --show-output
+// cargo test --test integration_test --features integration-test --release -- --ignored --nocapture --test-threads=1 --show-output
+
 
 use config::File as ConfigFile; // Use an alias for the File type from the config crate
 use ctor::{ctor, dtor};
@@ -143,13 +144,9 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     println!("--- Using Test Configuration for {} ---", broker_name);
 
     // Run the bridge in a separate task
-    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
-    bridge.initialize_from_config().await.unwrap();
-
-    // --- DIAGNOSTIC STEP 2: Assert that the bridge tasks were created ---
-    // assert!(test_config.routes.is_empty(), "FATAL: Bridge did not initialize any routes. No tasks were created.");
-
-    let bridge_task = tokio::spawn(bridge.run());
+    let bridge = mq_multi_bridge::Bridge::new(test_config);
+    let shutdown_tx = bridge.get_shutdown_handle();
+    let _bridge_task = bridge.run();
 
     // Poll the output file until all messages are received or we time out.
     // This is more robust than a fixed sleep.
@@ -165,7 +162,10 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    bridge_task.abort(); // We have our results, no need to let the bridge run longer.
+    // We have our results, no need to let the bridge run longer.
+    if shutdown_tx.send(()).is_err() {
+        println!("WARN: Could not send shutdown signal, bridge may have already stopped.");
+    }
 
     // Verify the output file
     assert_eq!(
@@ -248,13 +248,11 @@ async fn run_performance_pipeline_test(
         .insert(broker_to_file_route.to_string(), route_from_broker);
 
     // Run the bridge and measure
-    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
-    bridge.initialize_from_config().await.unwrap();
-
+    let bridge = mq_multi_bridge::Bridge::new(test_config);
+    let shutdown_tx = bridge.get_shutdown_handle();
     println!("[{}] Starting performance test...", broker_name);
     let start_time = std::time::Instant::now();
-
-    let bridge_task = tokio::spawn(bridge.run());
+    let _bridge_task = tokio::spawn(bridge.run());
 
     // Poll the output file until all messages are received or we time out.
     let timeout = Duration::from_secs(60); // Increased timeout for potentially slower brokers
@@ -267,7 +265,9 @@ async fn run_performance_pipeline_test(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let duration = start_time.elapsed();
-    bridge_task.abort();
+    if shutdown_tx.send(()).is_err() {
+        println!("WARN: Could not send shutdown signal, bridge may have already stopped.");
+    }
 
     let messages_per_second = num_messages as f64 / duration.as_secs_f64();
 
@@ -342,31 +342,26 @@ fn generate_test_file(path: &std::path::Path, num_messages: usize) -> HashSet<St
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_kafka_pipeline() {
     run_pipeline_test("Kafka", "tests/config.kafka").await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_nats_pipeline() {
     run_pipeline_test("NATS", "tests/config.nats").await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_amqp_pipeline() {
     run_pipeline_test("AMQP", "tests/config.amqp").await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_mqtt_pipeline() {
     run_pipeline_test("MQTT", "tests/config.mqtt").await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_all_pipelines_together() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.log");
@@ -413,13 +408,15 @@ async fn test_all_pipelines_together() {
     println!("------------------------------------------");
 
     // Run the bridge
-    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
-    bridge.initialize_from_config().await.unwrap();
-    let bridge_task = tokio::spawn(bridge.run());
+    let bridge = mq_multi_bridge::Bridge::new(test_config);
+    let shutdown_tx = bridge.get_shutdown_handle();
+    let _bridge_handle = bridge.run();
 
     // Wait for processing
     tokio::time::sleep(Duration::from_secs(30)).await;
-    drop(bridge_task);
+    if shutdown_tx.send(()).is_err() {
+        println!("WARN: Could not send shutdown signal, bridge may have already stopped.");
+    }
 
     // Verify all output files
     for (broker_name, path) in &output_paths {
@@ -444,7 +441,6 @@ async fn test_all_pipelines_together() {
 
 // cargo test --release --test integration_test -- --ignored --nocapture --test-threads=1 --show-output
 #[tokio::test]
-#[ignore]
 async fn test_file_to_file_performance() {
     // 1. Setup: Define test parameters and create temporary files.
     let num_messages = 1_000; // Use a large number for a meaningful performance test.
@@ -494,14 +490,13 @@ async fn test_file_to_file_performance() {
         .insert("file_to_file_perf".to_string(), route);
 
     // 3. Run the bridge and measure execution time.
-    let mut bridge = mq_multi_bridge::Bridge::from_config(test_config, None).unwrap();
-    bridge.initialize_from_config().await.unwrap();
+    let bridge = mq_multi_bridge::Bridge::new(test_config);
 
     println!("Starting performance test...");
     let start_time = std::time::Instant::now();
 
     // The bridge will run and the file-to-file route will complete when the source file reaches EOF.
-    bridge.run().await.unwrap();
+    bridge.run().await.unwrap().unwrap();
 
     let duration = start_time.elapsed();
     let messages_per_second = num_messages as f64 / duration.as_secs_f64();
@@ -533,25 +528,21 @@ async fn test_file_to_file_performance() {
 const PERF_TEST_MESSAGE_COUNT: usize = 10_000;
 
 #[tokio::test]
-#[ignore]
 async fn test_kafka_performance_pipeline() {
     run_performance_pipeline_test("Kafka", "tests/config.kafka", PERF_TEST_MESSAGE_COUNT).await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_nats_performance_pipeline() {
     run_performance_pipeline_test("NATS", "tests/config.nats", PERF_TEST_MESSAGE_COUNT).await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_amqp_performance_pipeline() {
     run_performance_pipeline_test("AMQP", "tests/config.amqp", PERF_TEST_MESSAGE_COUNT).await;
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_mqtt_performance_pipeline() {
     run_performance_pipeline_test("MQTT", "tests/config.mqtt", PERF_TEST_MESSAGE_COUNT).await;
 }

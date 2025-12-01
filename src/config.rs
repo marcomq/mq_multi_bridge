@@ -412,25 +412,25 @@ routes:
 
         // Route 0: Kafka to NATS
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__BROKERS",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__BROKERS",
             "env-kafka:9092",
         );
         // Source
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__GROUP_ID",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__GROUP_ID",
             "env-group",
         );
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__TOPIC",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__TOPIC",
             "env-in-topic",
         );
         // Sink
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__URL",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__URL",
             "nats://env-nats:4222",
         );
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__SUBJECT",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__SUBJECT",
             "env-out-subject",
         );
         // DLQ
@@ -468,75 +468,5 @@ routes:
             panic!("Expected Kafka source endpoint");
         }
 
-        // This macro helps create small, focused tests for each configuration type.
-        macro_rules! test_config_deserialization {
-            ($test_name:ident, $yaml:expr, $struct_type:ty) => {
-                #[test]
-                fn $test_name() {
-                    let yaml_config = $yaml;
-                    let result: Result<$struct_type, _> = serde_yaml::from_str(yaml_config);
-                    assert!(
-                        result.is_ok(),
-                        "Failed to deserialize for {}: {:?}",
-                        stringify!($test_name),
-                        result.err()
-                    );
-                }
-            };
-        }
-
-        // --- Test individual route configurations ---
-
-        test_config_deserialization!(
-            test_kafka_route_config,
-            r#"
-        in:
-          kafka:
-            brokers: "localhost:9092"
-            group_id: "test-group"
-        out:
-          file:
-            path: "/dev/null"
-        "#,
-            Route
-        );
-
-        test_config_deserialization!(
-            test_nats_route_config,
-            r#"
-        in:
-          nats:
-            url: "localhost:4222"
-            stream: "test-stream"
-            subject: "test-subject"
-        out:
-          file:
-            path: "/dev/null"
-        "#,
-            Route
-        );
-
-        test_config_deserialization!(
-            test_amqp_route_config,
-            r#"
-        in:
-          amqp:
-            url: "amqp://guest:guest@localhost:5672"
-            queue: "test-queue"
-        out:
-          file:
-            path: "/dev/null"
-        "#,
-            Route
-        );
-
-        test_config_deserialization!(
-            test_http_source_route_config,
-            r#"
-        in: { http: { listen_address: "0.0.0.0:8080" } }
-        out: { file: { path: "/dev/null" } }
-        "#,
-            Route
-        );
     }
 }

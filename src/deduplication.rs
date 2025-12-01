@@ -19,7 +19,7 @@ impl DeduplicationStore {
         info!("Opening deduplication database at: {:?}", path.as_ref());
 
         const MB: u64 = 1024 * 1024;
-        let cache_capacity_bytes = 250 * MB;
+        let cache_capacity_bytes = 25 * MB;
 
         let db = sled::Config::new()
             .path(path)
@@ -100,12 +100,11 @@ impl DeduplicationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_is_duplicate_new_and_seen() {
+    #[tokio::test]
+    async fn test_is_duplicate_new_and_seen() {
         // This test is now synchronous
         let dir = tempdir().unwrap();
         let store = DeduplicationStore::new(dir.path(), 60).unwrap();
@@ -121,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_duplicate_ttl_expiration() {
         let dir = tempdir().unwrap();
-        let ttl_seconds = 2;
+        let ttl_seconds = 1;
         let store = DeduplicationStore::new(dir.path(), ttl_seconds).unwrap();
         let message_id = Uuid::new_v4();
 
