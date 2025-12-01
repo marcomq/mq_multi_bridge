@@ -6,13 +6,13 @@ dedup_ttl_seconds: 60
 
 routes:
   file_to_amqp:
-    source:
+    in:
       file: { path: "/tmp/input.log" }
-    sink:
+    out:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
 
   amqp_to_file:
-    source:
+    in:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
-    sink:
+    out:
       file: { path: "/tmp/output_amqp.log" }

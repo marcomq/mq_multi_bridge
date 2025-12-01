@@ -1,7 +1,7 @@
 use crate::config::KafkaConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
@@ -17,12 +17,12 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
 
-pub struct KafkaSink {
+pub struct KafkaPublisher {
     producer: FutureProducer,
     topic: String,
 }
 
-impl KafkaSink {
+impl KafkaPublisher {
     pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         let mut client_config = ClientConfig::new();
         client_config
@@ -98,7 +98,7 @@ impl KafkaSink {
     }
 }
 
-impl Drop for KafkaSink {
+impl Drop for KafkaPublisher {
     fn drop(&mut self) {
         // When the sink is dropped, we need to make sure all buffered messages are sent.
         // `flush` is async, but `drop` is sync. The recommended way is to block on the future.
@@ -112,7 +112,7 @@ impl Drop for KafkaSink {
 }
 
 #[async_trait]
-impl MessageSink for KafkaSink {
+impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_string(&message)?;
         let key: String = message.message_id.to_string();
@@ -132,12 +132,12 @@ impl MessageSink for KafkaSink {
     }
 }
 
-pub struct KafkaSource {
+pub struct KafkaConsumer {
     consumer: Arc<Mutex<StreamConsumer>>,
 }
 use std::any::Any;
 
-impl KafkaSource {
+impl KafkaConsumer {
     pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
         let mut client_config = ClientConfig::new();
         if let Some(group_id) = &config.group_id {
@@ -198,7 +198,7 @@ impl KafkaSource {
 }
 
 #[async_trait]
-impl MessageSource for KafkaSource {
+impl MessageConsumer for KafkaConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let consumer_arc = self.consumer.clone();
         let lock = self.consumer.lock().await;
@@ -236,7 +236,7 @@ impl MessageSource for KafkaSource {
     }
 }
 
-impl Clone for KafkaSource {
+impl Clone for KafkaConsumer {
     fn clone(&self) -> Self {
         Self {
             consumer: self.consumer.clone(),

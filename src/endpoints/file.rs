@@ -2,11 +2,10 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
-
 use crate::config::FileConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::any::Any;
@@ -18,11 +17,11 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 /// A sink that writes messages to a file, one per line.
-pub struct FileSink {
+pub struct FilePublisher {
     writer: Arc<Mutex<BufWriter<File>>>,
 }
 
-impl FileSink {
+impl FilePublisher {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
         let path = Path::new(&config.path);
         if let Some(parent) = path.parent() {
@@ -47,7 +46,7 @@ impl FileSink {
     }
 }
 
-impl Clone for FileSink {
+impl Clone for FilePublisher {
     fn clone(&self) -> Self {
         Self {
             writer: self.writer.clone(),
@@ -56,7 +55,7 @@ impl Clone for FileSink {
 }
 
 #[async_trait]
-impl MessageSink for FileSink {
+impl MessagePublisher for FilePublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut payload = serde_json::to_vec(&message)?;
         payload.push(b'\n'); // Add a newline to separate messages
@@ -73,12 +72,12 @@ impl MessageSink for FileSink {
 }
 
 /// A source that reads messages from a file, one line at a time.
-pub struct FileSource {
+pub struct FileConsumer {
     reader: Arc<Mutex<BufReader<File>>>,
     path: String,
 }
 
-impl FileSource {
+impl FileConsumer {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -94,7 +93,7 @@ impl FileSource {
     }
 }
 
-impl Clone for FileSource {
+impl Clone for FileConsumer {
     fn clone(&self) -> Self {
         Self {
             reader: self.reader.clone(),
@@ -104,7 +103,7 @@ impl Clone for FileSource {
 }
 
 #[async_trait]
-impl MessageSource for FileSource {
+impl MessageConsumer for FileConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut reader = self.reader.lock().await;
         let mut line = String::new();
@@ -146,7 +145,7 @@ mod tests {
         let sink_config = FileConfig {
             path: file_path_str.clone(),
         };
-        let sink = FileSink::new(&sink_config).await.unwrap();
+        let sink = FilePublisher::new(&sink_config).await.unwrap();
 
         // 3. Send some messages
         let msg1 = CanonicalMessage::new(json!({"hello": "world"}));
@@ -159,7 +158,7 @@ mod tests {
         let source_config = FileConfig {
             path: file_path_str.clone(),
         };
-        let source = FileSource::new(&source_config).await.unwrap();
+        let source = FileConsumer::new(&source_config).await.unwrap();
 
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
@@ -190,7 +189,7 @@ mod tests {
         let sink_config = FileConfig {
             path: file_path.to_str().unwrap().to_string(),
         };
-        let sink_result = FileSink::new(&sink_config).await;
+        let sink_result = FilePublisher::new(&sink_config).await;
 
         assert!(sink_result.is_ok());
         assert!(nested_dir_path.exists());

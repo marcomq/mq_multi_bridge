@@ -1,7 +1,7 @@
 use crate::config::MqttConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
@@ -11,13 +11,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-pub struct MqttSink {
+pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
     _eventloop_handle: Arc<JoinHandle<()>>,
 }
 
-impl MqttSink {
+impl MqttPublisher {
     pub async fn new(
         config: &MqttConfig,
         topic: &str,
@@ -42,7 +42,7 @@ impl MqttSink {
 }
 
 #[async_trait]
-impl MessageSink for MqttSink {
+impl MessagePublisher for MqttPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_string(&message)?;
         self.client
@@ -56,7 +56,7 @@ impl MessageSink for MqttSink {
     }
 }
 
-impl Drop for MqttSink {
+impl Drop for MqttPublisher {
     fn drop(&mut self) {
         // To ensure all buffered messages are sent before the client is dropped,
         // we spawn a task to perform a graceful disconnect. This is crucial for sinks
@@ -68,14 +68,14 @@ impl Drop for MqttSink {
     }
 }
 
-pub struct MqttSource {
+pub struct MqttConsumer {
     client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
     message_rx: Arc<Mutex<mpsc::Receiver<rumqttc::Publish>>>,
     _eventloop_handle: Arc<JoinHandle<()>>,
 }
 
-impl MqttSource {
+impl MqttConsumer {
     pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
         let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
         let (message_tx, message_rx) = mpsc::channel(10);
@@ -133,7 +133,7 @@ impl MqttSource {
     }
 }
 
-impl Drop for MqttSource {
+impl Drop for MqttConsumer {
     fn drop(&mut self) {
         // When the source is dropped, abort its background eventloop task.
         self._eventloop_handle.abort();
@@ -141,7 +141,7 @@ impl Drop for MqttSource {
 }
 
 #[async_trait]
-impl MessageSource for MqttSource {
+impl MessageConsumer for MqttConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut message_rx = self.message_rx.lock().await;
         let p = message_rx
@@ -299,7 +299,7 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
     Ok((host, port))
 }
 
-impl Clone for MqttSource {
+impl Clone for MqttConsumer {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),

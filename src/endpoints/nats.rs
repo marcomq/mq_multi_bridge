@@ -1,7 +1,7 @@
 use crate::config::NatsConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_nats::{jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
@@ -15,12 +15,12 @@ use std::sync::Arc;
 use tokio::{sync::Mutex, time::Duration};
 use tracing::info;
 
-pub struct NatsSink {
+pub struct NatsPublisher {
     jetstream: jetstream::Context,
     subject: String,
 }
 
-impl NatsSink {
+impl NatsPublisher {
     pub async fn new(
         config: &NatsConfig,
         subject: &str,
@@ -64,7 +64,7 @@ impl NatsSink {
 }
 
 #[async_trait]
-impl MessageSink for NatsSink {
+impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_vec(&message)?;
         // Use jetstream.publish and await the ack future to guarantee delivery.
@@ -80,13 +80,13 @@ impl MessageSink for NatsSink {
     }
 }
 
-pub struct NatsSource {
+pub struct NatsConsumer {
     jetstream: jetstream::Context,
     subscription: Arc<Mutex<jetstream::consumer::pull::Stream>>,
 }
 use std::any::Any;
 
-impl NatsSource {
+impl NatsConsumer {
     pub async fn new(
         config: &NatsConfig,
         stream_name: &str,
@@ -150,7 +150,7 @@ impl NatsSource {
 }
 
 #[async_trait]
-impl MessageSource for NatsSource {
+impl MessageConsumer for NatsConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut sub = self.subscription.lock().await;
         let message = sub
@@ -178,7 +178,7 @@ impl MessageSource for NatsSource {
     }
 }
 
-impl Clone for NatsSource {
+impl Clone for NatsConsumer {
     fn clone(&self) -> Self {
         Self {
             jetstream: self.jetstream.clone(),

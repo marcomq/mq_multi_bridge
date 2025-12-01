@@ -5,7 +5,7 @@
 
 use crate::config::StaticResponseEndpoint;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
+use crate::publishers::MessagePublisher;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
@@ -13,11 +13,11 @@ use tracing::trace;
 
 /// A sink that responds with a static, pre-configured message.
 #[derive(Clone)]
-pub struct StaticResponseSink {
+pub struct StaticResponsePublisher {
     content: String,
 }
 
-impl StaticResponseSink {
+impl StaticResponsePublisher {
     pub fn new(config: &StaticResponseEndpoint) -> anyhow::Result<Self> {
         Ok(Self {
             content: config.content.clone(),
@@ -26,7 +26,7 @@ impl StaticResponseSink {
 }
 
 #[async_trait]
-impl MessageSink for StaticResponseSink {
+impl MessagePublisher for StaticResponsePublisher {
     async fn send(&self, _message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         trace!(response = %self.content, "Sending static response");
         Ok(Some(CanonicalMessage::new(Value::String(

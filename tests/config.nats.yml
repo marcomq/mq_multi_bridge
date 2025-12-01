@@ -6,13 +6,13 @@ dedup_ttl_seconds: 60
 
 routes:
   file_to_nats:
-    source:
+    in:
       file: { path: "/tmp/input.log" }
-    sink:
+    out:
       nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
 
   nats_to_file:
-    source:
+    in:
       nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
-    sink:
+    out:
       file: { path: "/tmp/output_nats.log" }

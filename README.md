@@ -83,12 +83,12 @@ metrics:
 # Define bridge routes from a source to a sink
 routes:
   my_kafka_to_nats:
-    source:
+    in:
       kafka:
         brokers: "kafka-us.example.com:9092"
         group_id: "bridge-group-us"
         # topic is optional, defaults to route name
-    sink:
+    out:
       nats:
         url: "nats://nats.example.com:4222"
         stream: "events"
@@ -99,41 +99,41 @@ routes:
       topic: "dlq-kafka-us-to-nats"
 
   amqp_to_kafka_orders:
-    source:
+    in:
       amqp:
         url: "amqp://user:pass@rabbitmq.example.com:5672"
         # queue is optional, defaults to route name
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         # topic is optional, defaults to route name
 
   webhook_to_kafka:
-    source:
+    in:
       http:
         listen_address: "0.0.0.0:8080"
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         # topic defaults to "webhook_to_kafka"
 
   kafka_to_url:
-    source:
+    in:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         topic: "outgoing.events"
-    sink:
+    out:
       http:
         url: "https://api.example.com/ingest" # Override default URL
 
   file_to_kafka:
-    source:
+    in:
       file:
         path: "/var/data/input.log"
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
@@ -158,13 +158,13 @@ export BRIDGE__METRICS__ENABLED=true
 export BRIDGE__METRICS__LISTEN_ADDRESS="0.0.0.0:9090"
 
 # Route 'kafka_us_to_nats_events': kafka -> nats
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__BROKERS="kafka-us.example.com:9092"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__GROUP_ID="bridge-group-us"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__TOPIC="raw_events" # topic is optional
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__BROKERS="kafka-us.example.com:9092"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__GROUP_ID="bridge-group-us"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__TOPIC="raw_events" # topic is optional
 
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__SUBJECT="processed.events"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__URL="nats://nats.example.com:4222"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__STREAM="events"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__SUBJECT="processed.events"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__URL="nats://nats.example.com:4222"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__STREAM="events"
 
 # DLQ for Route 'kafka_us_to_nats_events'
 export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__DLQ__KAFKA__BROKERS="kafka-dlq.example.com:9092"
@@ -182,7 +182,7 @@ Beyond running as a standalone application, mq-multi-bridge can be used as a lib
 ### 1. Implement a Custom Source or Sink 
 You can create your own sources and sinks by implementing the MessageSource and MessageSink traits. 
 ```rust 
-use mq_multi_bridge::sinks::MessageSink;
+use mq_multi_bridge::sinks::MessagePublisher;
 use mq_multi_bridge::model::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -193,7 +193,7 @@ pub struct MyCustomSink {
   // ... internal state 
 }
 #[async_trait]
-impl MessageSink for MyCustomSink {
+impl MessagePublisher for MyCustomSink {
   async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
     println!("Custom sink received message: {:?}", message);
     // Return Ok(None) for one-way sinks
@@ -210,8 +210,8 @@ Use the Bridge struct to configure your application. You can mix and match conne
 ```rust,ignore
 use mq_multi_bridge::Bridge;
 use mq_multi_bridge::config::{load_config, Config};
-use mq_multi_bridge::sources::MessageSource;
-use mq_multi_bridge::http::HttpSource; // Using a built-in source for the example
+use mq_multi_bridge::sources::MessageConsumer;
+use mq_multi_bridge::http::HttpConsumer; // Using a built-in source for the example
 use std::sync::Arc;
 
 // Assuming MyCustomSink from the example above
@@ -232,7 +232,7 @@ async fn run_custom_bridge() -> anyhow::Result<()> {
       listen_address: Some("0.0.0.0:9000".to_string()), 
       ..Default::default() 
   };
-  let my_source: Arc<dyn MessageSource> = Arc::new(HttpSource::new(&source_config).await?);
+  let my_source: Arc<dyn MessageConsumer> = Arc::new(HttpConsumer::new(&source_config).await?);
   
   // Create an instance of your custom sink
   let my_sink = Arc::new(MyCustomSink { /* ... */ });

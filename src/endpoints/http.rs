@@ -3,10 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
 use crate::config::HttpConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{
@@ -31,11 +31,11 @@ type HttpSourceMessage = (
 
 /// A source that listens for incoming HTTP requests.
 #[derive(Clone)]
-pub struct HttpSource {
+pub struct HttpConsumer {
     request_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<HttpSourceMessage>>>,
 }
 
-impl HttpSource {
+impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
 
@@ -95,7 +95,7 @@ impl HttpSource {
 }
 
 #[async_trait]
-impl MessageSource for HttpSource {
+impl MessageConsumer for HttpConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut rx = self.request_rx.lock().await;
         let (message, response_tx) = rx
@@ -156,13 +156,13 @@ async fn handle_request(
 
 /// A sink that sends messages to an HTTP endpoint.
 #[derive(Clone)]
-pub struct HttpSink {
+pub struct HttpPublisher {
     client: reqwest::Client,
     url: String,
     response_sink: Option<String>,
 }
 
-impl HttpSink {
+impl HttpPublisher {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let mut client_builder = reqwest::Client::builder();
 
@@ -192,7 +192,7 @@ impl HttpSink {
 }
 
 #[async_trait]
-impl MessageSink for HttpSink {
+impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let response = self
             .client

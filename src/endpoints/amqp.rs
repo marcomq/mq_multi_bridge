@@ -1,7 +1,7 @@
 use crate::config::AmqpConfig;
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -18,13 +18,13 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-pub struct AmqpSink {
+pub struct AmqpPublisher {
     channel: Channel,
     exchange: String,
     routing_key: String,
 }
 
-impl AmqpSink {
+impl AmqpPublisher {
     pub async fn new(config: &AmqpConfig, routing_key: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
@@ -56,7 +56,7 @@ impl AmqpSink {
 }
 
 #[async_trait]
-impl MessageSink for AmqpSink {
+impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let payload = serde_json::to_vec(&message)?;
         self.channel
@@ -77,12 +77,12 @@ impl MessageSink for AmqpSink {
     }
 }
 
-pub struct AmqpSource {
+pub struct AmqpConsumer {
     consumer: Arc<Mutex<Consumer>>,
 }
 
 use std::any::Any;
-impl AmqpSource {
+impl AmqpConsumer {
     pub async fn new(config: &AmqpConfig, queue: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
@@ -180,7 +180,7 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 }
 
 #[async_trait]
-impl MessageSource for AmqpSource {
+impl MessageConsumer for AmqpConsumer {
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut consumer_lock = self.consumer.lock().await;
         let delivery = consumer_lock
@@ -213,7 +213,7 @@ impl MessageSource for AmqpSource {
     }
 }
 
-impl Clone for AmqpSource {
+impl Clone for AmqpConsumer {
     fn clone(&self) -> Self {
         Self {
             consumer: self.consumer.clone(),

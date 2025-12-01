@@ -120,13 +120,13 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
         .clone();
 
     // Manually override the file paths in our cloned route objects
-    if let mq_multi_bridge::config::SourceEndpointType::File(f) =
-        &mut route_to_broker.source.endpoint_type
+    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
+        &mut route_to_broker.r#in.endpoint_type
     {
         f.config.path = input_path.to_str().unwrap().to_string();
     }
-    if let mq_multi_bridge::config::SinkEndpointType::File(f) =
-        &mut route_from_broker.sink.endpoint_type
+    if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
+        &mut route_from_broker.out.endpoint_type
     {
         f.config.path = output_path.to_str().unwrap().to_string();
     }
@@ -217,10 +217,10 @@ async fn run_performance_pipeline_test(broker_name: &str, config_file_name: &str
     let mut route_from_broker = full_config.routes.get(&broker_to_file_route).unwrap().clone();
 
     // Manually override the file paths
-    if let mq_multi_bridge::config::SourceEndpointType::File(f) = &mut route_to_broker.source.endpoint_type {
+    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) = &mut route_to_broker.r#in.endpoint_type {
         f.config.path = input_path.to_str().unwrap().to_string();
     }
-    if let mq_multi_bridge::config::SinkEndpointType::File(f) = &mut route_from_broker.sink.endpoint_type {
+    if let mq_multi_bridge::config::PublisherEndpointType::File(f) = &mut route_from_broker.out.endpoint_type {
         f.config.path = output_path.to_str().unwrap().to_string();
     }
     
@@ -363,13 +363,13 @@ async fn test_all_pipelines_together() {
     // Override file paths for all routes
     for (route_name, route) in test_config.routes.iter_mut() {
         // Override source file paths
-        if let mq_multi_bridge::config::SourceEndpointType::File(f) =
-            &mut route.source.endpoint_type
+        if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
+            &mut route.r#in.endpoint_type
         {
             f.config.path = input_path.to_str().unwrap().to_string();
         }
         // Override sink file paths
-        if let mq_multi_bridge::config::SinkEndpointType::File(f) = &mut route.sink.endpoint_type {
+        if let mq_multi_bridge::config::PublisherEndpointType::File(f) = &mut route.out.endpoint_type {
             for (broker_name, path) in &output_paths {
                 if route_name.contains(broker_name) {
                     f.config.path = path.to_str().unwrap().to_string();
@@ -431,9 +431,9 @@ async fn test_file_to_file_performance() {
 
     // 2. Configure the bridge for a simple file-to-file route.
     let route = mq_multi_bridge::config::Route {
-        source: mq_multi_bridge::config::SourceEndpoint {
-            endpoint_type: mq_multi_bridge::config::SourceEndpointType::File(
-                mq_multi_bridge::config::FileSourceEndpoint {
+        r#in: mq_multi_bridge::config::ConsumerEndpoint {
+            endpoint_type: mq_multi_bridge::config::ConsumerEndpointType::File(
+                mq_multi_bridge::config::FileConsumerEndpoint {
                     config: mq_multi_bridge::config::FileConfig {
                         path: input_path.to_str().unwrap().to_string(),
                     },
@@ -441,9 +441,9 @@ async fn test_file_to_file_performance() {
                 },
             ),
         },
-        sink: mq_multi_bridge::config::SinkEndpoint {
-            endpoint_type: mq_multi_bridge::config::SinkEndpointType::File(
-                mq_multi_bridge::config::FileSinkEndpoint {
+        out: mq_multi_bridge::config::PublisherEndpoint {
+            endpoint_type: mq_multi_bridge::config::PublisherEndpointType::File(
+                mq_multi_bridge::config::FilePublisherEndpoint {
                     config: mq_multi_bridge::config::FileConfig {
                         path: output_path.to_str().unwrap().to_string(),
                     },

@@ -143,31 +143,13 @@ pub struct StaticResponseEndpoint {
     pub content: String,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub struct SourceEndpoint {
-    // pub connection: String,
-    #[serde(flatten)]
-    pub endpoint_type: SourceEndpointType,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceEndpointType {
-    Kafka(KafkaSourceEndpoint),
-    Nats(NatsSourceEndpoint),
-    Amqp(AmqpSourceEndpoint),
-    Mqtt(MqttSourceEndpoint),
-    File(FileSourceEndpoint),
-    Http(HttpSourceEndpoint),
-}
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
-pub struct SinkEndpoint {
+pub struct PublisherEndpoint {
     // pub connection: String,
     #[serde(flatten)]
-    pub endpoint_type: SinkEndpointType,
+    pub endpoint_type: PublisherEndpointType,
 }
 
 pub fn load_config() -> Result<Config, config::ConfigError> {
@@ -196,22 +178,33 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
-pub enum SinkEndpointType {
-    Kafka(KafkaSinkEndpoint),
-    Nats(NatsSinkEndpoint),
-    Amqp(AmqpSinkEndpoint),
-    Mqtt(MqttSinkEndpoint),
-    File(FileSinkEndpoint),
-    Http(HttpSinkEndpoint),
+pub enum PublisherEndpointType {
+    Kafka(KafkaPublisherEndpoint),
+    Nats(NatsPublisherEndpoint),
+    Amqp(AmqpPublisherEndpoint),
+    Mqtt(MqttPublisherEndpoint),
+    File(FilePublisherEndpoint),
+    Http(HttpPublisherEndpoint),
     StaticResponse(StaticResponseEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Route {
-    pub source: SourceEndpoint,
-    pub sink: SinkEndpoint,
+    pub r#in: ConsumerEndpoint,
+    pub out: PublisherEndpoint,
     pub dlq: Option<DlqConfig>,
     pub concurrency: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsumerEndpointType {
+    Kafka(KafkaConsumerEndpoint),
+    Nats(NatsConsumerEndpoint),
+    Amqp(AmqpConsumerEndpoint),
+    Mqtt(MqttConsumerEndpoint),
+    File(FileConsumerEndpoint),
+    Http(HttpConsumerEndpoint),
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
@@ -231,7 +224,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct KafkaSourceEndpoint {
+pub struct KafkaConsumerEndpoint {
     #[serde(flatten)]
     pub config: KafkaConfig,
     #[serde(flatten)]
@@ -239,7 +232,7 @@ pub struct KafkaSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct NatsSourceEndpoint {
+pub struct NatsConsumerEndpoint {
     #[serde(flatten)]
     pub config: NatsConfig,
     #[serde(flatten)]
@@ -247,7 +240,7 @@ pub struct NatsSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct AmqpSourceEndpoint {
+pub struct AmqpConsumerEndpoint {
     #[serde(flatten)]
     pub config: AmqpConfig,
     #[serde(flatten)]
@@ -255,7 +248,7 @@ pub struct AmqpSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct MqttSourceEndpoint {
+pub struct MqttConsumerEndpoint {
     #[serde(flatten)]
     pub config: MqttConfig,
     #[serde(flatten)]
@@ -263,7 +256,7 @@ pub struct MqttSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct FileSourceEndpoint {
+pub struct FileConsumerEndpoint {
     #[serde(flatten)]
     pub config: FileConfig,
     #[serde(flatten)]
@@ -271,7 +264,7 @@ pub struct FileSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct HttpSourceEndpoint {
+pub struct HttpConsumerEndpoint {
     #[serde(flatten)]
     pub config: HttpConfig,
     #[serde(flatten)]
@@ -279,7 +272,7 @@ pub struct HttpSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct KafkaSinkEndpoint {
+pub struct KafkaPublisherEndpoint {
     #[serde(flatten)]
     pub config: KafkaConfig,
     #[serde(flatten)]
@@ -287,7 +280,7 @@ pub struct KafkaSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct NatsSinkEndpoint {
+pub struct NatsPublisherEndpoint {
     #[serde(flatten)]
     pub config: NatsConfig,
     #[serde(flatten)]
@@ -295,7 +288,7 @@ pub struct NatsSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct AmqpSinkEndpoint {
+pub struct AmqpPublisherEndpoint {
     #[serde(flatten)]
     pub config: AmqpConfig,
     #[serde(flatten)]
@@ -303,7 +296,7 @@ pub struct AmqpSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct MqttSinkEndpoint {
+pub struct MqttPublisherEndpoint {
     #[serde(flatten)]
     pub config: MqttConfig,
     #[serde(flatten)]
@@ -311,7 +304,7 @@ pub struct MqttSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct FileSinkEndpoint {
+pub struct FilePublisherEndpoint {
     #[serde(flatten)]
     pub config: FileConfig,
     #[serde(flatten)]
@@ -319,7 +312,7 @@ pub struct FileSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct HttpSinkEndpoint {
+pub struct HttpPublisherEndpoint {
     #[serde(flatten)]
     pub config: HttpConfig,
     #[serde(flatten)]
@@ -350,7 +343,7 @@ pub struct DlqKafkaEndpoint {
 pub struct DlqConfig {
     // pub connection: String,
     #[serde(flatten)]
-    pub kafka: KafkaSinkEndpoint,
+    pub kafka: KafkaPublisherEndpoint,
 }
 
 #[allow(unused_imports)]
@@ -370,12 +363,12 @@ metrics:
 
 routes:
   kafka_to_nats:
-    source:
+    in:
       kafka:
         brokers: "kafka:9092"
         group_id: "bridge_group"
         topic: "in_topic"
-    sink:
+    out:
       nats:
         url: "nats://nats:4222"
         subject: "out_subject"
@@ -395,12 +388,11 @@ routes:
 
         let route = &config.routes["kafka_to_nats"];
         assert!(route.dlq.is_some());
-        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+        if let ConsumerEndpointType::Kafka(k) = &route.r#in.endpoint_type {
             assert_eq!(k.config.brokers, "kafka:9092");
             assert_eq!(k.endpoint.topic.as_deref(), Some("in_topic"));
         }
     }
-
     #[test]
     fn test_config_from_env_vars() {
         // Set environment variables
@@ -462,12 +454,11 @@ routes:
         assert_eq!(name, "kafka_to_nats_from_env");
 
         // Assert source
-        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+        if let ConsumerEndpointType::Kafka(k) = &route.r#in.endpoint_type {
             assert_eq!(k.config.brokers, "env-kafka:9092"); // group_id is now optional
             assert_eq!(k.endpoint.topic.as_deref(), Some("env-in-topic"));
         } else {
-            panic!("Expected Kafka source");
-        }
+            panic!("Expected Kafka source endpoint");
     }
 
     // This macro helps create small, focused tests for each configuration type.
@@ -492,11 +483,11 @@ routes:
     test_config_deserialization!(
         test_kafka_route_config,
         r#"
-        source:
+        in:
           kafka:
             brokers: "localhost:9092"
             group_id: "test-group"
-        sink:
+        out:
           file:
             path: "/dev/null"
         "#,
@@ -506,12 +497,12 @@ routes:
     test_config_deserialization!(
         test_nats_route_config,
         r#"
-        source:
+        in:
           nats:
             url: "localhost:4222"
             stream: "test-stream"
             subject: "test-subject"
-        sink:
+        out:
           file:
             path: "/dev/null"
         "#,
@@ -521,11 +512,11 @@ routes:
     test_config_deserialization!(
         test_amqp_route_config,
         r#"
-        source:
+        in:
           amqp:
             url: "amqp://guest:guest@localhost:5672"
             queue: "test-queue"
-        sink:
+        out:
           file:
             path: "/dev/null"
         "#,
@@ -535,8 +526,8 @@ routes:
     test_config_deserialization!(
         test_http_source_route_config,
         r#"
-        source: { http: { listen_address: "0.0.0.0:8080" } }
-        sink: { file: { path: "/dev/null" } }
+        in: { http: { listen_address: "0.0.0.0:8080" } }
+        out: { file: { path: "/dev/null" } }
         "#,
         Route
     );
