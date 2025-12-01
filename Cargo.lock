@@ -1781,6 +1781,7 @@ name = "mq_multi_bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-nats",
  "async-trait",
  "axum",

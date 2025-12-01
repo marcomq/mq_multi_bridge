@@ -13,10 +13,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::tempdir;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 struct DockerCompose {
     // No longer need to hold the child process, as we'll manage it globally.
@@ -306,15 +305,18 @@ fn startup() {
     // Store the guard in a static to ensure it lives for the duration of the test run.
     *LOG_GUARD.lock().unwrap() = Some(guard);
 
+    // Use EnvFilter to allow log levels to be set by the RUST_LOG environment variable.
+    // Default to "info" if RUST_LOG is not set.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking_writer)
         .with_ansi(false);
 
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_filter(LevelFilter::INFO);
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
 
     tracing_subscriber::registry()
+        .with(env_filter)
         .with(file_layer)
         .with(stdout_layer)
         .init();
@@ -442,7 +444,7 @@ async fn test_all_pipelines_together() {
 #[tokio::test]
 async fn test_file_to_file_performance() {
     // 1. Setup: Define test parameters and create temporary files.
-    let num_messages = 1_000; // Use a large number for a meaningful performance test.
+    let num_messages = 20_000; // Use a large number for a meaningful performance test.
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("perf_input.log");
     let output_path = temp_dir.path().join("perf_output.log");
@@ -478,6 +480,7 @@ async fn test_file_to_file_performance() {
         },
         dlq: None,
         concurrency: Some(100), // Set concurrency for this test route
+        deduplication_enabled: false,
     };
 
     let mut test_config = AppConfig::default();
@@ -490,12 +493,14 @@ async fn test_file_to_file_performance() {
 
     // 3. Run the bridge and measure execution time.
     let bridge = mq_multi_bridge::Bridge::new(test_config);
+    let shutdown_tx = bridge.get_shutdown_handle();
 
     println!("Starting performance test...");
     let start_time = std::time::Instant::now();
 
     // The bridge will run and the file-to-file route will complete when the source file reaches EOF.
-    bridge.run().await.unwrap().unwrap();
+    let bridge_handle = bridge.run();
+    bridge_handle.await.unwrap().unwrap();
 
     let duration = start_time.elapsed();
     let messages_per_second = num_messages as f64 / duration.as_secs_f64();
@@ -508,6 +513,9 @@ async fn test_file_to_file_performance() {
     );
     println!("Rate: {:.2} messages/second", messages_per_second);
     println!("--------------------------------\n");
+
+    // Explicitly drop the shutdown handle.
+    drop(shutdown_tx);
 
     // 4. Verification: Ensure all messages were transferred correctly.
     let received_ids = read_output_file(&output_path);
@@ -524,7 +532,7 @@ async fn test_file_to_file_performance() {
 
 // --- Individual Broker Performance Tests ---
 
-const PERF_TEST_MESSAGE_COUNT: usize = 10_000;
+const PERF_TEST_MESSAGE_COUNT: usize = 20_000;
 
 #[tokio::test]
 async fn test_kafka_performance_pipeline() {

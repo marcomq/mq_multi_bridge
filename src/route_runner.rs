@@ -11,9 +11,9 @@ use crate::publishers::MessagePublisher;
 use anyhow::Result;
 use metrics::{counter, histogram};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Barrier, Mutex, Semaphore};
+use tokio::sync::{watch, Barrier};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, trace};
@@ -156,13 +156,10 @@ impl RouteRunner {
         dedup_store: Arc<DeduplicationStore>,
     ) -> Result<()> {
         let concurrency = self.route.concurrency.unwrap_or(10);
-        let (tx, rx) = mpsc::channel(concurrency * 2);
-        let rx = Arc::new(Mutex::new(rx)); // Wrap receiver in Arc<Mutex> for sharing
+        // Use an MPMC channel to allow multiple workers to receive concurrently without a mutex.
+        let (tx, rx) = async_channel::unbounded();
         let mut tasks = JoinSet::new();
-        // Semaphore to signal available messages in the channel, preventing lock contention.
-        // It starts with 0 permits.
-        let semaphore = Arc::new(Semaphore::new(0));
-        let semaphore_clone = semaphore.clone();
+
         // --- Producer Task ---
         // This task's only job is to receive messages and send them to the processing channel.
         let mut producer_shutdown_rx = self.shutdown_rx.clone();
@@ -180,11 +177,9 @@ impl RouteRunner {
                                 trace!(%msg_id, "Message received from source consumer, queuing for processing.");
                                 if tx.send(message_data).await.is_err() {
                                     // If the send fails, the channel is closed, so we stop.
-                                    // No need to add a permit here.
                                     info!("Processing channel closed. Stopping producer.");
                                     break;
                                 }
-                                semaphore_clone.add_permits(1); // Signal that a message is available
                             }
                             Err(e) => {
                                 if e.to_string().contains("End of file") {
@@ -203,69 +198,64 @@ impl RouteRunner {
         // --- Consumer Tasks ---
         // Spawn a pool of workers to process messages concurrently.
         let consumer_shutdown_rx = self.shutdown_rx.clone();
+        let deduplication_enabled = self.route.deduplication_enabled;
         for _ in 0..concurrency {
             let route_name = self.name.clone();
             let dedup = dedup_store.clone();
             let publisher = publisher.clone();
             let dlq_publisher = dlq_publisher.clone();
-            let rx = rx.clone();
-            let semaphore = semaphore.clone();
+            let rx_clone = rx.clone();
             let mut consumer_shutdown_rx = consumer_shutdown_rx.clone();
 
             tasks.spawn(async move {
                 // Each worker task runs a loop, processing messages until the channel is closed.
                 loop {
-                    // Wait for a permit, which signals a message is available.
-                    // This is more efficient than constantly locking the mutex.
-                    let permit = tokio::select! {
+                    tokio::select! {
                         biased;
                         _ = consumer_shutdown_rx.changed() => {
                             info!("Shutdown signal received in worker. Exiting.");
                             break;
                         }
-                        permit = semaphore.acquire() => permit,
-                    };
-                    let Ok(_permit) = permit else {
-                        break;
-                    };
+                        result = rx_clone.recv() => {
+                            let Ok((message, commit_fn)) = result else {
+                                // Channel is empty and disconnected, so we can exit.
+                                break;
+                            };
+                            trace!(msg_id = %message.message_id, "Worker picked up message from channel.");
 
-                    // Now that we have a permit, we can lock and receive the message.
-                    // This should not block for long, as the permit guarantees a message is ready.
-                    let Some((message, commit_fn)) = rx.lock().await.recv().await else {
-                        // This can happen if the channel closes after a permit is acquired.
-                        break;
-                    };
-                    trace!(msg_id = %message.message_id, "Worker picked up message from channel.");
+                            let msg_id = message.message_id;
+                            let start_time = std::time::Instant::now();
 
-                    let msg_id = message.message_id;
-                    let start_time = std::time::Instant::now();
-
-                    if dedup.is_duplicate(&msg_id).unwrap_or(false) {
-                        trace!(%msg_id, "Duplicate message, skipping.");
-                        counter!("bridge_messages_duplicate_total", "route" => route_name.clone()).increment(1);
-                        commit_fn(None).await; // Acknowledge the duplicate
-                        continue;
-                    }
-
-                    counter!("bridge_messages_received_total", "route" => route_name.clone()).increment(1);
-
-                    trace!(%msg_id, "Sending message to publisher.");
-                    match publisher.send(message.clone()).await {
-                        Ok(response) => {
-                            histogram!("bridge_message_processing_duration_seconds", "route" => route_name.clone()).record(start_time.elapsed().as_secs_f64());
-                            counter!("bridge_messages_sent_total", "route" => route_name.clone()).increment(1);
-                            debug!(%msg_id, "Message sent successfully.");
-                            commit_fn(response).await;
-                        }
-                        Err(e) => {
-                            error!(%msg_id, error = %e, "Failed to send message, attempting DLQ.");
-                            counter!("bridge_messages_dlq_total", "route" => route_name.clone()).increment(1);
-                            if let Some(dlq) = dlq_publisher.clone() {
-                                if let Err(dlq_err) = dlq.send(message).await {
-                                    error!(%msg_id, error = %dlq_err, "Failed to send message to DLQ.");
+                            if deduplication_enabled {
+                                if dedup.is_duplicate(&msg_id).unwrap_or(false) {
+                                    trace!(%msg_id, "Duplicate message, skipping.");
+                                    counter!("bridge_messages_duplicate_total", "route" => route_name.clone()).increment(1);
+                                    commit_fn(None).await; // Acknowledge the duplicate
+                                    continue;
                                 }
                             }
-                            commit_fn(None).await; // Acknowledge after DLQ attempt
+
+                            counter!("bridge_messages_received_total", "route" => route_name.clone()).increment(1);
+
+                            trace!(%msg_id, "Sending message to publisher.");
+                            match publisher.send(message.clone()).await {
+                                Ok(response) => {
+                                    histogram!("bridge_message_processing_duration_seconds", "route" => route_name.clone()).record(start_time.elapsed().as_secs_f64());
+                                    counter!("bridge_messages_sent_total", "route" => route_name.clone()).increment(1);
+                                    debug!(%msg_id, "Message sent successfully.");
+                                    commit_fn(response).await;
+                                }
+                                Err(e) => {
+                                    error!(%msg_id, error = %e, "Failed to send message, attempting DLQ.");
+                                    counter!("bridge_messages_dlq_total", "route" => route_name.clone()).increment(1);
+                                    if let Some(dlq) = dlq_publisher.clone() {
+                                        if let Err(dlq_err) = dlq.send(message).await {
+                                            error!(%msg_id, error = %dlq_err, "Failed to send message to DLQ.");
+                                        }
+                                    }
+                                    commit_fn(None).await; // Acknowledge after DLQ attempt
+                                }
+                            }
                         }
                     }
                 }
@@ -273,24 +263,20 @@ impl RouteRunner {
         }
 
         // Wait for all tasks to complete.
-        loop {
-            tokio::select! {
-                _ = self.shutdown_rx.changed() => {
-                    info!("Shutdown signal received. Stopping message processing.");
-                    tasks.shutdown().await;
-                    break;
-                }
-                Some(res) = tasks.join_next() => {
-                    if let Err(e) = res {
-                        error!("A route processing task failed: {}", e);
-                    }
-                }
-                else => {
-                    // All tasks have finished.
-                    break;
-                }
+        // This loop will exit when all tasks in the JoinSet have completed.
+        // This happens naturally when the producer task finishes (e.g., on EOF)
+        // and the worker tasks drain the channel.
+        while let Some(res) = tasks.join_next().await {
+            if let Err(e) = res {
+                error!("A route processing task failed: {}", e);
             }
         }
+
+        // After all tasks are done, explicitly flush the publisher to ensure all buffered
+        // messages are written before the route runner exits. This is crucial for file-based
+        // publishers where the process might exit before the OS flushes the buffer.
+        info!("Flushing final messages for route.");
+        publisher.flush().await?;
         Ok(())
     }
 

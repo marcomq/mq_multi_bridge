@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 /// A sink that writes messages to a file, one per line.
+#[derive(Clone)]
 pub struct FilePublisher {
     writer: Arc<Mutex<BufWriter<File>>>,
 }
@@ -46,14 +47,6 @@ impl FilePublisher {
     }
 }
 
-impl Clone for FilePublisher {
-    fn clone(&self) -> Self {
-        Self {
-            writer: self.writer.clone(),
-        }
-    }
-}
-
 #[async_trait]
 impl MessagePublisher for FilePublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
@@ -66,12 +59,19 @@ impl MessagePublisher for FilePublisher {
         Ok(None)
     }
 
+    async fn flush(&self) -> anyhow::Result<()> {
+        let mut writer = self.writer.lock().await;
+        writer.flush().await?;
+        Ok(())
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
 /// A source that reads messages from a file, one line at a time.
+#[derive(Clone)]
 pub struct FileConsumer {
     reader: Arc<Mutex<BufReader<File>>>,
     path: String,
@@ -90,15 +90,6 @@ impl FileConsumer {
             reader: Arc::new(Mutex::new(BufReader::new(file))),
             path: config.path.clone(),
         })
-    }
-}
-
-impl Clone for FileConsumer {
-    fn clone(&self) -> Self {
-        Self {
-            reader: self.reader.clone(),
-            path: self.path.clone(),
-        }
     }
 }
 

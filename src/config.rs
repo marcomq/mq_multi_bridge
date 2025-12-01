@@ -201,6 +201,8 @@ pub struct Route {
     pub out: PublisherEndpoint,
     pub dlq: Option<DlqConfig>,
     pub concurrency: Option<usize>,
+    #[serde(default = "default_true")]
+    pub deduplication_enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -215,6 +217,10 @@ pub enum ConsumerEndpointType {
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
