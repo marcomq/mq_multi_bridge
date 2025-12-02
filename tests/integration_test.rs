@@ -250,10 +250,8 @@ async fn run_performance_pipeline_test(
     let shutdown_tx = bridge.get_shutdown_handle();
     println!("[{}] Starting performance test...", broker_name);
     let start_time = std::time::Instant::now();
-    let bridge_task = tokio::spawn(bridge.run());
-    println!("[{}] Waiting...", broker_name);
-    bridge_task.join().await.unwrap().unwrap();
-    println!("[{}] Finished", broker_name);
+    let _bridge_task = tokio::spawn(bridge.run());
+
     // Poll the output file until all messages are received or we time out.
     let timeout = Duration::from_secs(60); // Increased timeout for potentially slower brokers
     let mut received_ids = HashSet::new();
