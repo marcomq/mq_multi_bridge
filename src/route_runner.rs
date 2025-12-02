@@ -183,6 +183,7 @@ impl RouteRunner {
                             }
                             Err(e) => {
                                 if e.to_string().contains("End of file") {
+                                    sleep(Duration::from_millis(100)).await;
                                     info!("Consumer reached end of stream. Shutting down producer.");
                                 } else {
                                     error!(error = %e, "Unrecoverable consumer error. Shutting down producer.");

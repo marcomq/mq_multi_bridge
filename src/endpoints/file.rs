@@ -95,7 +95,7 @@ impl FileConsumer {
 
 #[async_trait]
 impl MessageConsumer for FileConsumer {
-    #[instrument(skip(self), fields(path = %self.path), err)]
+    #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
     async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut reader = self.reader.lock().await;
         let mut line = String::new();
