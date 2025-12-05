@@ -43,6 +43,8 @@ pub struct NatsConfig {
     pub password: Option<String>,
     pub token: Option<String>,
     pub default_stream: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
     #[serde(flatten, default)]
     pub tls: ClientTlsConfig,
 }
@@ -54,6 +56,8 @@ pub struct AmqpConfig {
     pub tls: ClientTlsConfig,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]

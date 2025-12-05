@@ -9,8 +9,8 @@ pub type BoxedMessageStream =
     Box<dyn FnOnce(Option<CanonicalMessage>) -> BoxFuture<'static, ()> + Send + 'static>;
 
 #[async_trait]
-pub trait MessageConsumer: Send + Sync + 'static {
+pub trait MessageConsumer: Send + Sync {
     /// Receives a single message.
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)>;
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)>;
     fn as_any(&self) -> &dyn Any;
 }

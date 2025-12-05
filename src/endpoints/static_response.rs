@@ -6,7 +6,6 @@
 use crate::config::StaticResponseEndpoint;
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
-use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
 use tracing::trace;
@@ -25,13 +24,13 @@ impl StaticResponsePublisher {
     }
 }
 
+use async_trait::async_trait;
 #[async_trait]
 impl MessagePublisher for StaticResponsePublisher {
     async fn send(&self, _message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         trace!(response = %self.content, "Sending static response");
-        Ok(Some(CanonicalMessage::new(Value::String(
-            self.content.clone(),
-        ))))
+        let payload = serde_json::to_vec(&Value::String(self.content.clone()))?;
+        Ok(Some(CanonicalMessage::new(payload)))
     }
 
     fn as_any(&self) -> &dyn Any {

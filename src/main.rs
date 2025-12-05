@@ -64,7 +64,7 @@ async fn run_app(config: Config) -> anyhow::Result<()> {
     }
 
     // --- 3. Run the bridge logic from the library ---
-    let bridge = Bridge::new(config);
+    let mut bridge = Bridge::new(config);
     let shutdown_tx = bridge.get_shutdown_handle();
     let bridge_handle = bridge.run();
 

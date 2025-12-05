@@ -24,11 +24,11 @@ use tracing::info;
 pub async fn create_consumer_from_route(
     route_name: &str,
     endpoint: &ConsumerEndpoint,
-) -> Result<Arc<dyn MessageConsumer>> {
+) -> Result<Box<dyn MessageConsumer>> {
     match &endpoint.endpoint_type {
         ConsumerEndpointType::Kafka(cfg) => {
             let topic = cfg.endpoint.topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(kafka::KafkaConsumer::new(&cfg.config, topic)?))
+            Ok(Box::new(kafka::KafkaConsumer::new(&cfg.config, topic)?))
         }
         ConsumerEndpointType::Nats(cfg) => {
             let subject = cfg.endpoint.subject.as_deref().unwrap_or(route_name);
@@ -43,25 +43,23 @@ pub async fn create_consumer_from_route(
                         route_name
                     )
                 })?;
-            Ok(Arc::new(
+            Ok(Box::new(
                 nats::NatsConsumer::new(&cfg.config, stream_name, subject).await?,
             ))
         }
         ConsumerEndpointType::Amqp(cfg) => {
             let queue = cfg.endpoint.queue.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(amqp::AmqpConsumer::new(&cfg.config, queue).await?))
+            Ok(Box::new(amqp::AmqpConsumer::new(&cfg.config, queue).await?))
         }
         ConsumerEndpointType::Mqtt(cfg) => {
             let topic = cfg.endpoint.topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(
+            Ok(Box::new(
                 mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
             ))
         }
-        ConsumerEndpointType::File(cfg) => {
-            Ok(Arc::new(file::FileConsumer::new(&cfg.config).await?))
-        }
+        ConsumerEndpointType::File(cfg) => Ok(Box::new(file::FileConsumer::new(&cfg.config).await?)),
         ConsumerEndpointType::Http(cfg) => {
-            Ok(Arc::new(http::HttpConsumer::new(&cfg.config).await?))
+            Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?))
         }
     }
 }

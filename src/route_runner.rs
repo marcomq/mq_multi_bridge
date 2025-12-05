@@ -11,12 +11,16 @@ use crate::publishers::MessagePublisher;
 use anyhow::Result;
 use metrics::{counter, histogram};
 use std::path::Path;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, Barrier};
+use tokio::sync::{mpsc, watch, Barrier};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{error, info, instrument, trace};
+
+pub(crate) enum RouteRunnerCommand {
+    Flush,
+}
 
 /// Manages the lifecycle of a single route.
 pub(crate) struct RouteRunner {
@@ -24,6 +28,7 @@ pub(crate) struct RouteRunner {
     route: Route,
     barrier: Arc<Barrier>,
     shutdown_rx: watch::Receiver<()>,
+    command_rx: mpsc::Receiver<RouteRunnerCommand>,
 }
 
 impl RouteRunner {
@@ -32,32 +37,43 @@ impl RouteRunner {
         route: Route,
         barrier: Arc<Barrier>,
         shutdown_rx: watch::Receiver<()>,
+        command_rx: mpsc::Receiver<RouteRunnerCommand>,
     ) -> Self {
         Self {
             name,
             route,
             barrier,
             shutdown_rx,
+            command_rx,
         }
     }
 
     #[instrument(name = "route", skip_all, fields(route.name = %self.name))]
-    pub(crate) async fn run(mut self) {
-        info!("Initializing route {}", self.name);
-        let dedup_store = self.setup_deduplication().await;
+    pub(crate) async fn run(self) {
+        let RouteRunner {
+            name,
+            route,
+            barrier,
+            mut shutdown_rx,
+            mut command_rx,
+        } = self;
 
+        info!("Initializing route {}", name);
+        let dedup_store = Self::setup_deduplication(&name, &mut shutdown_rx).await;
+        // Take ownership of the command receiver. It cannot be cloned.
         loop {
             // Check for shutdown before attempting to connect.
-            if self.shutdown_rx.has_changed().unwrap_or(false) {
+            if shutdown_rx.has_changed().unwrap_or(false) {
                 info!("Shutdown signal received during initialization. Route stopping.");
                 return;
             }
 
             // 1. Connect to the publisher (and DLQ) first. Retry on failure.
-            let publisher = match self
-                .connect_with_retry("publisher", || {
-                    create_publisher_from_route(&self.name, &self.route.out)
-                })
+            let publisher = match Self::connect_with_retry(
+                "publisher",
+                || create_publisher_from_route(&name, &route.out),
+                &mut shutdown_rx,
+            )
                 .await
             {
                 Some(p) => p,
@@ -65,11 +81,12 @@ impl RouteRunner {
             };
 
             // The DLQ is optional, so we handle it separately.
-            let dlq_publisher = if self.route.dlq.is_some() {
-                match self
-                    .connect_with_retry("dlq", || {
-                        create_dlq_from_route(&self.route, self.name.as_str())
-                    })
+            let dlq_publisher = if route.dlq.is_some() {
+                match Self::connect_with_retry(
+                    "dlq",
+                    || create_dlq_from_route(&route, name.as_str()),
+                    &mut shutdown_rx,
+                )
                     .await
                 {
                     Some(Some(d)) => Some(d), // Successfully connected to DLQ
@@ -81,10 +98,11 @@ impl RouteRunner {
             };
 
             // 2. Connect to the consumer. Retry on failure.
-            let consumer = match self
-                .connect_with_retry("consumer", || {
-                    create_consumer_from_route(&self.name, &self.route.r#in)
-                })
+            let consumer = match Self::connect_with_retry(
+                "consumer",
+                || create_consumer_from_route(&name, &route.r#in),
+                &mut shutdown_rx,
+            )
                 .await
             {
                 Some(c) => c,
@@ -94,34 +112,46 @@ impl RouteRunner {
             // Wait for all other routes to also connect their consumers.
             // This prevents fast producers from starting before slow consumers are ready.
             info!("Consumer connected. Waiting for other routes to be ready...");
-            self.barrier.wait().await;
+            barrier.wait().await;
 
             info!("Route connected. Starting message processing.");
-            let processing_result = self
-                .process_messages(consumer, publisher, dlq_publisher, dedup_store.clone())
-                .await;
+            let processing_result = Self::process_messages(
+                &name,
+                &route,
+                &mut shutdown_rx,
+                consumer,
+                publisher,
+                dlq_publisher,
+                dedup_store.clone(),
+                command_rx,
+            )
+            .await;
 
             match processing_result {
                 Ok(_) => {
                     info!("Consumer stream ended (e.g., EOF). Route finished.");
                     break; // Exit the loop, route is done.
                 }
-                Err(e) => {
+                Err((e, returned_command_rx)) => {
                     error!(error = %e, "An unrecoverable error occurred during message processing. Re-establishing connections in 5s.");
-                    sleep(Duration::from_secs(5)).await;
+                    command_rx = returned_command_rx; // Recover ownership for the next loop iteration
+                    tokio::select! { _ = sleep(Duration::from_secs(5)) => {}, _ = shutdown_rx.changed() => return }
                 }
             }
         }
     }
 
     /// Connects to an endpoint, retrying with exponential backoff until successful or shutdown.
-    async fn connect_with_retry<T, F, Fut>(&self, endpoint_name: &str, connect_fn: F) -> Option<T>
+    async fn connect_with_retry<T, F, Fut>(
+        endpoint_name: &str,
+        connect_fn: F,
+        shutdown_rx: &mut watch::Receiver<()>,
+    ) -> Option<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let mut attempts = 0;
-        let mut shutdown_rx = self.shutdown_rx.clone();
         loop {
             tokio::select! {
                 // Clone the receiver to get a mutable copy for `changed()`
@@ -149,59 +179,60 @@ impl RouteRunner {
 
     /// The main loop for receiving, processing, and acknowledging messages.
     async fn process_messages(
-        &mut self,
-        consumer: Arc<dyn MessageConsumer>,
+        name: &str,
+        route: &Route,
+        shutdown_rx: &mut watch::Receiver<()>,
+        mut consumer: Box<dyn MessageConsumer>,
         publisher: Arc<dyn MessagePublisher>,
         dlq_publisher: Option<Arc<dyn MessagePublisher>>,
         dedup_store: Arc<DeduplicationStore>,
-    ) -> Result<()> {
-        let concurrency = self.route.concurrency.unwrap_or(10);
+        command_rx: mpsc::Receiver<RouteRunnerCommand>,
+    ) -> Result<(), (anyhow::Error, mpsc::Receiver<RouteRunnerCommand>)> {
+        let concurrency = route.concurrency.unwrap_or(10);
         // Use an MPMC channel to allow multiple workers to receive concurrently without a mutex.
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(concurrency);
         let mut tasks = JoinSet::new();
 
-        // --- Producer Task ---
+        // --- Message Receiver Task ---
         // This task's only job is to receive messages and send them to the processing channel.
-        let mut producer_shutdown_rx = self.shutdown_rx.clone();
+        let mut producer_shutdown_rx = shutdown_rx.clone();
         tasks.spawn(async move {
             loop {
-                tokio::select! {
+                let message_data_result: Result<_, anyhow::Error> = tokio::select! {
                     _ = producer_shutdown_rx.changed() => {
                         info!("Shutdown signal received in producer. Stopping message reception.");
-                        break;
+                        return Ok(()); // Gracefully exit the task
                     }
-                    result = consumer.receive() => {
-                        match result {
-                            Ok(message_data) => {
-                                let msg_id = message_data.0.message_id;
-                                trace!(%msg_id, "Message received from source consumer, queuing for processing.");
-                                if tx.send(message_data).await.is_err() {
-                                    // If the send fails, the channel is closed, so we stop.
-                                    info!("Processing channel closed. Stopping producer.");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                if e.to_string().contains("End of file") {
-                                    sleep(Duration::from_millis(100)).await;
-                                    info!("Consumer reached end of stream. Shutting down producer.");
-                                } else {
-                                    error!(error = %e, "Unrecoverable consumer error. Shutting down producer.");
-                                }
-                                break; // Exit loop on any consumer error or EOF
-                            }
+                    result = consumer.receive() => result,
+                };
+
+                match message_data_result {
+                    Ok((message_data, commit_fn)) => {
+                        if tx.send((message_data, commit_fn)).await.is_err() {
+                            info!("Processing channel closed. Stopping producer.");
+                            break; // Exit loop
                         }
                     }
-                }
+                    Err(e) => {
+                        if e.to_string().contains("End of file") {
+                            info!("Consumer reached end of stream. Shutting down producer.");
+                        } else {
+                            error!(error = %e, "Unrecoverable consumer error. Shutting down producer task.");
+                            return Err(e); // Propagate the error
+                        }
+                        break; // Exit loop on EOF or other handled errors
+                    }
+                };
             }
+            Ok(())
         });
 
-        // --- Consumer Tasks ---
+        // --- Message Worker Tasks ---
         // Spawn a pool of workers to process messages concurrently.
-        let consumer_shutdown_rx = self.shutdown_rx.clone();
-        let deduplication_enabled = self.route.deduplication_enabled;
+        let consumer_shutdown_rx = shutdown_rx.clone();
+        let deduplication_enabled = route.deduplication_enabled;
         for _ in 0..concurrency {
-            let route_name = self.name.clone();
+            let route_name = name.to_string();
             let dedup = dedup_store.clone();
             let publisher = publisher.clone();
             let dlq_publisher = dlq_publisher.clone();
@@ -243,7 +274,7 @@ impl RouteRunner {
                                 Ok(response) => {
                                     histogram!("bridge_message_processing_duration_seconds", "route" => route_name.clone()).record(start_time.elapsed().as_secs_f64());
                                     counter!("bridge_messages_sent_total", "route" => route_name.clone()).increment(1);
-                                    debug!(%msg_id, "Message sent successfully.");
+                                    trace!(%msg_id, "Message sent successfully.");
                                     commit_fn(response).await;
                                 }
                                 Err(e) => {
@@ -260,16 +291,55 @@ impl RouteRunner {
                         }
                     }
                 }
+                Ok(())
             });
         }
 
-        // Wait for all tasks to complete.
-        // This loop will exit when all tasks in the JoinSet have completed.
-        // This happens naturally when the producer task finishes (e.g., on EOF)
-        // and the worker tasks drain the channel.
-        while let Some(res) = tasks.join_next().await {
-            if let Err(e) = res {
-                error!("A route processing task failed: {}", e);
+        // --- Main Processing and Command Loop ---
+        let mut flush_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut command_rx = command_rx; // Make it mutable here
+        loop {
+            tokio::select! {
+                // Handle commands for this route
+                Some(command) = command_rx.recv() => {
+                    match command {
+                        RouteRunnerCommand::Flush => {
+                            trace!("Manual flush command received.");
+                            Self::flush_publishers(publisher.clone(), dlq_publisher.clone()).await;
+                        }
+                    }
+                },
+                // Handle periodic flushing
+                _ = flush_interval.tick() => {
+                    trace!("Periodic flush triggered.");
+                    Self::flush_publishers(publisher.clone(), dlq_publisher.clone()).await;
+                },
+                // Check for task completion or failure
+                Some(res) = tasks.join_next() => {
+                    match res {
+                        Ok(Ok(_)) => {
+                            // A task finished gracefully. If all tasks are done, we can exit.
+                            if tasks.is_empty() {
+                                break;
+                            }
+                        },
+                        Ok(Err(e)) => {
+                            // An unrecoverable error from the consumer task.
+                            tasks.abort_all();
+                            return Err((e, command_rx));
+                        },
+                        Err(join_err) if join_err.is_cancelled() => {
+                            // Task was cancelled, probably by abort_all. Continue draining.
+                        },
+                        Err(join_err) => {
+                            // A task panicked. This is a critical error.
+                            let panic_err = anyhow::anyhow!("A route task panicked: {}", join_err);
+                            tasks.abort_all();
+                            return Err((panic_err, command_rx));
+                        }
+                    }
+                },
+                else => break, // All tasks are complete
             }
         }
 
@@ -277,13 +347,37 @@ impl RouteRunner {
         // messages are written before the route runner exits. This is crucial for file-based
         // publishers where the process might exit before the OS flushes the buffer.
         info!("Flushing final messages for route.");
-        publisher.flush().await?;
+        if let Err(e) = publisher.flush().await {
+            return Err((e, command_rx));
+        }
+        if let Some(dlq) = dlq_publisher {
+            if let Err(e) = dlq.flush().await {
+                return Err((e, command_rx));
+            }
+        }
         Ok(())
     }
 
-    async fn setup_deduplication(&self) -> Arc<DeduplicationStore> {
+    async fn flush_publishers(
+        publisher: Arc<dyn MessagePublisher>,
+        dlq_publisher: Option<Arc<dyn MessagePublisher>>,
+    ) {
+        if let Err(e) = publisher.flush().await {
+            error!(error = %e, "Failed to flush publisher");
+        }
+        if let Some(dlq) = dlq_publisher {
+            if let Err(e) = dlq.flush().await {
+                error!(error = %e, "Failed to flush DLQ publisher");
+            }
+        }
+    }
+
+    async fn setup_deduplication(
+        name: &str,
+        shutdown_rx: &mut watch::Receiver<()>,
+    ) -> Arc<DeduplicationStore> {
         // The sled_path should come from a global config, but for now, we'll hardcode a temp path.
-        let db_path = Path::new("/tmp/mq_multi_bridge/db").join(&self.name);
+        let db_path = Path::new("/tmp/mq_multi_bridge/db").join(name);
         let dedup_store = Arc::new(
             DeduplicationStore::new(db_path, 86400) // Default TTL
                 .expect("Failed to create instance-specific deduplication store"),
@@ -291,7 +385,7 @@ impl RouteRunner {
 
         // Spawn a task to periodically flush the deduplication database
         let dedup_flusher = dedup_store.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {

@@ -4,30 +4,32 @@ use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::StreamExt;
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
         QueueDeclareOptions,
     },
-    types::FieldTable,
-    BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
+    types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
-use std::{sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use std::time::Duration;
 use tracing::{debug, info};
 
 pub struct AmqpPublisher {
     channel: Channel,
     exchange: String,
     routing_key: String,
+    await_ack: bool,
 }
 
 impl AmqpPublisher {
     pub async fn new(config: &AmqpConfig, routing_key: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
+        // Enable publisher confirms on this channel to allow waiting for acks.
+        channel
+            .confirm_select(lapin::options::ConfirmSelectOptions::default())
+            .await?;
 
         // Ensure the queue exists before we try to publish to it. This is idempotent.
         info!(queue = %routing_key, "Declaring AMQP queue in sink");
@@ -43,6 +45,7 @@ impl AmqpPublisher {
             channel,
             exchange: "".to_string(), // Default exchange
             routing_key: routing_key.to_string(),
+            await_ack: config.await_ack,
         })
     }
 
@@ -51,6 +54,7 @@ impl AmqpPublisher {
             channel: self.channel.clone(),
             exchange: self.exchange.clone(),
             routing_key: routing_key.to_string(),
+            await_ack: self.await_ack,
         }
     }
 }
@@ -58,17 +62,20 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_vec(&message)?;
-        self.channel
+        let confirmation = self.channel
             .basic_publish(
                 &self.exchange,
                 &self.routing_key,
                 BasicPublishOptions::default(),
-                &payload,
+                &message.payload,
                 BasicProperties::default(),
             )
-            .await?
-            .await?; // Wait for publisher confirm
+            .await?;
+
+        if self.await_ack {
+            // Wait for the broker's publisher confirmation.
+            confirmation.await?;
+        }
         Ok(None)
     }
 
@@ -78,7 +85,7 @@ impl MessagePublisher for AmqpPublisher {
 }
 
 pub struct AmqpConsumer {
-    consumer: Arc<Mutex<Consumer>>,
+    consumer: Consumer,
 }
 
 use std::any::Any;
@@ -110,14 +117,8 @@ impl AmqpConsumer {
             .await?;
 
         Ok(Self {
-            consumer: Arc::new(Mutex::new(consumer)),
+            consumer,
         })
-    }
-
-    pub async fn with_queue(&self, _queue: &str) -> anyhow::Result<Self> {
-        // For this implementation, the consumer is tied to a single queue on creation.
-        // We will reuse the existing consumer.
-        Ok(self.clone())
     }
 }
 
@@ -181,16 +182,12 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 
 #[async_trait]
 impl MessageConsumer for AmqpConsumer {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut consumer_lock = self.consumer.lock().await;
-        let delivery = consumer_lock
-            .next()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        let delivery = futures::StreamExt::next(&mut self.consumer)
             .await
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
 
-        let payload: serde_json::Value =
-            serde_json::from_slice(&delivery.data).map_err(anyhow::Error::from)?;
-        let message = CanonicalMessage::deserialized_new(payload);
+        let message = CanonicalMessage::new(delivery.data.clone());
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -210,13 +207,5 @@ impl MessageConsumer for AmqpConsumer {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl Clone for AmqpConsumer {
-    fn clone(&self) -> Self {
-        Self {
-            consumer: self.consumer.clone(),
-        }
     }
 }

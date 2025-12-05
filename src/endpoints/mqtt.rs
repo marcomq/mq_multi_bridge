@@ -8,7 +8,7 @@ use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, Q
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 pub struct MqttPublisher {
@@ -39,9 +39,8 @@ impl MqttPublisher {
 #[async_trait]
 impl MessagePublisher for MqttPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_string(&message)?;
         self.client
-            .publish(&self.topic, QoS::AtLeastOnce, false, payload)
+            .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
             .await?;
         Ok(None)
     }
@@ -64,10 +63,10 @@ impl Drop for MqttPublisher {
 }
 
 pub struct MqttConsumer {
-    client: AsyncClient,
+    _client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
-    message_rx: Arc<Mutex<mpsc::Receiver<rumqttc::Publish>>>,
     _eventloop_handle: Arc<JoinHandle<()>>,
+    message_rx: mpsc::Receiver<rumqttc::Publish>,
 }
 
 impl MqttConsumer {
@@ -110,21 +109,10 @@ impl MqttConsumer {
         client.subscribe(topic, QoS::AtLeastOnce).await?;
 
         Ok(Self {
-            client,
-            message_rx: Arc::new(Mutex::new(message_rx)),
+            _client: client,
+            message_rx,
             _eventloop_handle: Arc::new(eventloop_handle),
         })
-    }
-
-    pub async fn with_topic(&self, topic: &str) -> anyhow::Result<Self> {
-        self.client.subscribe(topic, QoS::AtLeastOnce).await?;
-        info!(topic = %topic, "MQTT source subscribed to new topic");
-        Ok(self.clone())
-    }
-
-    // Add an accessor for the client
-    pub fn client(&self) -> AsyncClient {
-        self.client.clone()
     }
 }
 
@@ -137,14 +125,12 @@ impl Drop for MqttConsumer {
 
 #[async_trait]
 impl MessageConsumer for MqttConsumer {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut message_rx = self.message_rx.lock().await;
-        let p = message_rx
-            .recv()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        let p = self.message_rx.recv()
             .await
             .ok_or_else(|| anyhow!("MQTT source channel closed"))?;
 
-        let canonical_message: CanonicalMessage = serde_json::from_slice(&p.payload)?;
+        let canonical_message = CanonicalMessage::new(p.payload.to_vec());
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -292,14 +278,4 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
             1883
         });
     Ok((host, port))
-}
-
-impl Clone for MqttConsumer {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            message_rx: self.message_rx.clone(),
-            _eventloop_handle: self._eventloop_handle.clone(),
-        }
-    }
 }

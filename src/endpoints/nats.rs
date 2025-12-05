@@ -5,19 +5,19 @@ use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_nats::{jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
-use futures::StreamExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
 use std::sync::Arc;
-use tokio::{sync::Mutex, time::Duration};
+use tokio::time::Duration;
 use tracing::info;
 
 pub struct NatsPublisher {
     jetstream: jetstream::Context,
     subject: String,
+    await_ack: bool,
 }
 
 impl NatsPublisher {
@@ -38,10 +38,9 @@ impl NatsPublisher {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     // The stream must be configured to capture the specific subject,
-                    // and optionally any sub-subjects if it's a wildcard.
-                    // A subject filter of `foo.>` will match `foo.bar` but not `foo`.
-                    // So we need both `subject` and `subject.*` if we want to match both.
-                    subjects: vec![subject.to_string(), format!("{}.>", subject)],
+                    // or a wildcard. A subject filter of `stream_name.>` will capture
+                    // all subjects that start with the stream name, which is a common pattern.
+                    subjects: vec![format!("{}.>", stream_name)], // e.g., "perf_stream_nats.>"
                     ..Default::default()
                 })
                 .await?;
@@ -52,6 +51,7 @@ impl NatsPublisher {
         Ok(Self {
             jetstream,
             subject: subject.to_string(),
+            await_ack: config.await_ack,
         })
     }
 
@@ -59,6 +59,7 @@ impl NatsPublisher {
         Self {
             jetstream: self.jetstream.clone(),
             subject: subject.to_string(),
+            await_ack: self.await_ack,
         }
     }
 }
@@ -66,12 +67,14 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_vec(&message)?;
-        // Use jetstream.publish and await the ack future to guarantee delivery.
-        self.jetstream
-            .publish(self.subject.clone(), payload.into())
-            .await?
-            .await?; // This second await waits for the server acknowledgement.
+        let ack_future = self
+            .jetstream
+            .publish(self.subject.clone(), message.payload.into())
+            .await?;
+
+        if self.await_ack {
+            ack_future.await?; // Wait for the server acknowledgment
+        }
         Ok(None)
     }
 
@@ -81,8 +84,8 @@ impl MessagePublisher for NatsPublisher {
 }
 
 pub struct NatsConsumer {
-    jetstream: jetstream::Context,
-    subscription: Arc<Mutex<jetstream::consumer::pull::Stream>>,
+    _jetstream: jetstream::Context,
+    subscription: jetstream::consumer::pull::Stream,
 }
 use std::any::Any;
 
@@ -96,12 +99,13 @@ impl NatsConsumer {
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
-        // Also ensure the stream exists on the consumer side. This is idempotent and helps
-        // prevent race conditions where the consumer starts before the publisher has created the stream.
+        // Ensure the stream exists. This is idempotent and safe to call from both
+        // publisher and consumer. It prevents race conditions where the consumer
+        // might start before the publisher has created the stream.
         jetstream
             .get_or_create_stream(stream::Config {
                 name: stream_name.to_string(),
-                subjects: vec![subject.to_string(), format!("{}.>", subject)],
+                subjects: vec![format!("{}.>", stream_name)],
                 ..Default::default()
             })
             .await?;
@@ -135,23 +139,20 @@ impl NatsConsumer {
         info!(stream = %stream_name, subject = %subject, "NATS source subscribed to subject");
 
         Ok(Self {
-            jetstream,
-            subscription: Arc::new(Mutex::new(subscription)),
+            _jetstream: jetstream,
+            subscription,
         })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut sub = self.subscription.lock().await;
-        let message = sub
-            .next()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        let message = futures::StreamExt::next(&mut self.subscription)
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
 
-        let canonical_message: CanonicalMessage =
-            serde_json::from_slice(&message.payload).map_err(anyhow::Error::from)?;
+        let canonical_message = CanonicalMessage::new(message.payload.to_vec());
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -167,15 +168,6 @@ impl MessageConsumer for NatsConsumer {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl Clone for NatsConsumer {
-    fn clone(&self) -> Self {
-        Self {
-            jetstream: self.jetstream.clone(),
-            subscription: self.subscription.clone(),
-        }
     }
 }
 

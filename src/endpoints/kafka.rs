@@ -12,9 +12,7 @@ use rdkafka::{
     error::RDKafkaErrorCode,
     ClientConfig, Message, TopicPartitionList,
 };
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tracing::info;
 
 pub struct KafkaPublisher {
@@ -61,26 +59,28 @@ impl KafkaPublisher {
         }
 
         // Create the topic if it doesn't exist
-        let admin_client: AdminClient<_> = client_config.create()?;
-        let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
-        let results = admin_client
-            .create_topics(&[new_topic], &AdminOptions::new())
-            .await?;
+        if !topic.is_empty() {
+            let admin_client: AdminClient<_> = client_config.create()?;
+            let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+            let results = admin_client
+                .create_topics(&[new_topic], &AdminOptions::new())
+                .await?;
 
-        // Check the result of the topic creation.
-        // It's okay if the topic already exists.
-        for result in results {
-            match result {
-                Ok(topic_name) => {
-                    info!(topic = %topic_name, "Kafka topic created or already exists")
-                }
-                Err((topic_name, error_code)) => {
-                    if error_code != RDKafkaErrorCode::TopicAlreadyExists {
-                        return Err(anyhow!(
-                            "Failed to create Kafka topic '{}': {}",
-                            topic_name,
-                            error_code
-                        ));
+            // Check the result of the topic creation.
+            // It's okay if the topic already exists.
+            for result in results {
+                match result {
+                    Ok(topic_name) => {
+                        info!(topic = %topic_name, "Kafka topic created or already exists")
+                    }
+                    Err((topic_name, error_code)) => {
+                        if error_code != RDKafkaErrorCode::TopicAlreadyExists {
+                            return Err(anyhow!(
+                                "Failed to create Kafka topic '{}': {}",
+                                topic_name,
+                                error_code
+                            ));
+                        }
                     }
                 }
             }
@@ -119,17 +119,21 @@ impl Drop for KafkaPublisher {
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_string(&message)?;
-        let key: String = message.message_id.to_string();
-        let record = FutureRecord::to(&self.topic).payload(&payload).key(&key);
+        let key = message.message_id.to_string();
+        let record = FutureRecord::to(&self.topic).payload(&message.payload).key(&key);
 
-        // "Fire and forget" send. The `FutureProducer` will handle batching and sending in the background.
-        // We don't await the result here to avoid blocking and to allow for high throughput.
-        // The producer is configured with retries, and the `Drop` impl handles flushing.
-        if let Err((e, _)) = self.producer.send_result(record) {
-            return Err(anyhow!("Kafka send error: {}", e));
-        }
+        // This will await the delivery report from Kafka, providing at-least-once guarantees.
+        // The RouteRunner's concurrency will hide this latency.
+        self.producer.send(record, Duration::from_secs(0)).await
+            .map_err(|(e, _)| anyhow!("Kafka message delivery failed: {}", e))?;
+
         Ok(None)
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        self.producer
+            .flush(Duration::from_secs(10))
+            .map_err(|e| anyhow!("Kafka flush error: {}", e))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -138,12 +142,13 @@ impl MessagePublisher for KafkaPublisher {
 }
 
 pub struct KafkaConsumer {
-    consumer: Arc<Mutex<StreamConsumer>>,
+    consumer: std::sync::Arc<StreamConsumer>,
 }
 use std::any::Any;
 
 impl KafkaConsumer {
     pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+        use std::sync::Arc;
         let mut client_config = ClientConfig::new();
         if let Some(group_id) = &config.group_id {
             client_config.set("group.id", group_id);
@@ -187,46 +192,32 @@ impl KafkaConsumer {
         }
 
         Ok(Self {
-            consumer: Arc::new(Mutex::new(consumer)),
+            consumer: Arc::new(consumer),
         })
-    }
-
-    pub async fn with_topic(&self, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
-        let new_source = self.clone();
-        {
-            let consumer = new_source.consumer.lock().await;
-            consumer.subscribe(&[topic])?;
-        }
-        info!(topic = %topic, "Kafka source subscribed to new topic");
-        Ok(new_source)
     }
 }
 
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let consumer_arc = self.consumer.clone();
-        let lock = self.consumer.lock().await;
-        let message = lock.recv().await?;
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        let message = self.consumer.recv().await?;
 
         let payload = message
             .payload()
             .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
-        let canonical_message: CanonicalMessage =
-            serde_json::from_slice(payload).map_err(anyhow::Error::from)?;
+        let canonical_message = CanonicalMessage::new(payload.to_vec());
 
-        // We can't move the `BorrowedMessage` into the commit closure because it has a limited lifetime.
-        // Instead, we extract the information needed for the commit.
+        // The commit function for Kafka needs to commit the offset of the processed message.
+        // We can't move `self.consumer` into the closure, but we can commit by position.
+        let consumer = std::sync::Arc::clone(&self.consumer);
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(
             message.topic(),
             message.partition(),
             Offset::Offset(message.offset() + 1),
         )?;
-        let commit = Box::new(move |_response| {
-            let consumer_arc_clone = consumer_arc.clone();
+        let commit = Box::new(move |_response: Option<CanonicalMessage>| {
             Box::pin(async move {
-                let consumer = consumer_arc_clone.lock().await;
                 consumer
                     .commit(&tpl, CommitMode::Async)
                     .unwrap_or_else(|e| tracing::error!("Failed to commit Kafka message: {:?}", e));
@@ -238,13 +229,5 @@ impl MessageConsumer for KafkaConsumer {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl Clone for KafkaConsumer {
-    fn clone(&self) -> Self {
-        Self {
-            consumer: self.consumer.clone(),
-        }
     }
 }

@@ -10,17 +10,14 @@ use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::post,
-    Json, Router,
+    response::{IntoResponse, Response}, routing::post, Router,
 };
 use axum_server::{tls_rustls::RustlsConfig, Handle};
-use serde_json::Value;
 use std::any::Any;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument};
 
@@ -30,9 +27,8 @@ type HttpSourceMessage = (
 );
 
 /// A source that listens for incoming HTTP requests.
-#[derive(Clone)]
 pub struct HttpConsumer {
-    request_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<HttpSourceMessage>>>,
+    request_rx: mpsc::Receiver<HttpSourceMessage>,
 }
 
 impl HttpConsumer {
@@ -89,17 +85,15 @@ impl HttpConsumer {
 
         ready_rx.await?;
         Ok(Self {
-            request_rx: Arc::new(tokio::sync::Mutex::new(request_rx)),
+            request_rx,
         })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut rx = self.request_rx.lock().await;
-        let (message, response_tx) = rx
-            .recv()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+        let (message, response_tx) = self.request_rx.recv()
             .await
             .ok_or_else(|| anyhow!("HTTP source channel closed"))?;
 
@@ -123,10 +117,10 @@ impl MessageConsumer for HttpConsumer {
 #[instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
 async fn handle_request(
     State(tx): State<mpsc::Sender<HttpSourceMessage>>,
-    Json(payload): Json<Value>,
+    body: Bytes,
 ) -> Response {
     let (response_tx, response_rx) = oneshot::channel();
-    let message = CanonicalMessage::deserialized_new(payload);
+    let message = CanonicalMessage::new(body.to_vec());
 
     if tx.send((message, response_tx)).await.is_err() {
         return (
@@ -138,7 +132,12 @@ async fn handle_request(
 
     match response_rx.await {
         Ok(Ok(Some(response_message))) => {
-            (StatusCode::OK, Json(response_message.payload)).into_response()
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                response_message.payload,
+            )
+                .into_response()
         }
         Ok(Ok(None)) => (StatusCode::ACCEPTED, "Message processed").into_response(),
         Ok(Err(e)) => (
@@ -197,28 +196,25 @@ impl MessagePublisher for HttpPublisher {
         let response = self
             .client
             .post(&self.url)
-            .json(&message)
+            .body(message.payload)
             .send()
             .await
             .with_context(|| format!("Failed to send HTTP request to {}", self.url))?;
 
         let response_status = response.status();
-        let response_payload = response
-            .json::<Value>()
-            .await
-            .with_context(|| "Failed to parse JSON response from HTTP sink")?;
+        let response_bytes = response.bytes().await?.to_vec();
 
         if !response_status.is_success() {
             return Err(anyhow!(
                 "HTTP sink request failed with status {}: {:?}",
                 response_status,
-                response_payload
+                String::from_utf8_lossy(&response_bytes)
             ));
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if self.response_sink.is_some() {
-            Ok(Some(CanonicalMessage::new(response_payload)))
+            Ok(Some(CanonicalMessage::new(response_bytes)))
         } else {
             Ok(None)
         }

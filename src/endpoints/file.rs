@@ -8,12 +8,13 @@ use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::{info, instrument};
 
 /// A sink that writes messages to a file, one per line.
@@ -49,13 +50,15 @@ impl FilePublisher {
 
 #[async_trait]
 impl MessagePublisher for FilePublisher {
+    #[instrument(skip_all, fields(message_id = %message.message_id))]
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut payload = serde_json::to_vec(&message)?;
+        let mut payload = message.payload;
         payload.push(b'\n'); // Add a newline to separate messages
 
         let mut writer = self.writer.lock().await;
         writer.write_all(&payload).await?;
-        writer.flush().await?; // Ensure it's written to disk
+        // writer.flush().await?;
+
         Ok(None)
     }
 
@@ -71,10 +74,9 @@ impl MessagePublisher for FilePublisher {
 }
 
 /// A source that reads messages from a file, one line at a time.
-#[derive(Clone)]
 pub struct FileConsumer {
-    reader: Arc<Mutex<BufReader<File>>>,
     path: String,
+    reader: BufReader<File>,
 }
 
 impl FileConsumer {
@@ -87,7 +89,7 @@ impl FileConsumer {
 
         info!(path = %config.path, "File source opened for reading");
         Ok(Self {
-            reader: Arc::new(Mutex::new(BufReader::new(file))),
+            reader: BufReader::new(file),
             path: config.path.clone(),
         })
     }
@@ -96,18 +98,17 @@ impl FileConsumer {
 #[async_trait]
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut reader = self.reader.lock().await;
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
         let mut line = String::new();
 
-        let bytes_read = reader.read_line(&mut line).await?;
+        let bytes_read = self.reader.read_line(&mut line).await?;
         if bytes_read == 0 {
             info!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 
-        let payload: serde_json::Value = serde_json::from_str(&line)?;
-        let message = CanonicalMessage::deserialized_new(payload);
+        // Trim the newline character that read_line includes
+        let message = CanonicalMessage::new(line.trim_end().as_bytes().to_vec());
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
@@ -122,8 +123,7 @@ impl MessageConsumer for FileConsumer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::CanonicalMessage;
+    use crate::{config::FileConfig, consumers::MessageConsumer, endpoints::file::{FileConsumer, FilePublisher}, model::CanonicalMessage, publishers::MessagePublisher};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -140,18 +140,21 @@ mod tests {
         };
         let sink = FilePublisher::new(&sink_config).await.unwrap();
 
-        // 3. Send some messages
-        let msg1 = CanonicalMessage::new(json!({"hello": "world"}));
-        let msg2 = CanonicalMessage::new(json!({"foo": "bar"}));
+        let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
+        let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
 
         sink.send(msg1.clone()).await.unwrap();
         sink.send(msg2.clone()).await.unwrap();
+        // Explicitly flush to ensure data is written before we try to read it.
+        sink.flush().await.unwrap();
+        // Drop the sink to release the file lock on some OSes before the source tries to open it.
+        drop(sink);
 
-        // 4. Create a FileSource to read from the same file
+        // 4. Create a FileConsumer to read from the same file
         let source_config = FileConfig {
             path: file_path_str.clone(),
         };
-        let source = FileConsumer::new(&source_config).await.unwrap();
+        let mut source = FileConsumer::new(&source_config).await.unwrap();
 
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();

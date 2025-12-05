@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use tracing::info;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct DeduplicationStore {
@@ -58,8 +58,8 @@ impl DeduplicationStore {
 
     /// Checks if a message ID has been seen recently. If not, it stores it.
     /// Returns `true` if the message is a duplicate, `false` otherwise.
-    pub fn is_duplicate(&self, message_id: &Uuid) -> Result<bool, sled::Error> {
-        let key = message_id.as_bytes();
+    pub fn is_duplicate(&self, message_id: &u64) -> Result<bool, sled::Error> {
+        let key = message_id.to_be_bytes();
         let now = self.current_time.load(Ordering::Relaxed);
         let new_value = now.to_be_bytes();
 
@@ -100,15 +100,16 @@ impl DeduplicationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seahash::hash;
     use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_is_duplicate_new_and_seen() {
-        // This test is now synchronous
         let dir = tempdir().unwrap();
         let store = DeduplicationStore::new(dir.path(), 60).unwrap();
-        let message_id = Uuid::new_v4();
+        let payload = b"test_payload";
+        let message_id = hash(payload);
 
         // First time seeing this ID, should not be a duplicate.
         assert!(!store.is_duplicate(&message_id).unwrap());
@@ -122,7 +123,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let ttl_seconds = 1;
         let store = DeduplicationStore::new(dir.path(), ttl_seconds).unwrap();
-        let message_id = Uuid::new_v4();
+        let payload = b"another_payload";
+        let message_id = hash(payload);
 
         // First time, not a duplicate
         assert!(!store.is_duplicate(&message_id).unwrap());
