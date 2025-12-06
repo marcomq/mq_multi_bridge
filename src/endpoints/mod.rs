@@ -9,7 +9,7 @@ pub mod http;
 pub mod kafka;
 pub mod mqtt;
 pub mod nats;
-pub mod static_response;
+pub mod static_endpoint;
 
 use crate::config::{
     ConsumerEndpoint, ConsumerEndpointType, PublisherEndpoint, PublisherEndpointType, Route,
@@ -63,6 +63,9 @@ pub async fn create_consumer_from_route(
         ConsumerEndpointType::Http(cfg) => {
             Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?))
         }
+        ConsumerEndpointType::Static(cfg) => {
+            Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
+        }
     }
 }
 
@@ -107,8 +110,8 @@ pub async fn create_publisher_from_route(
             }
             Ok(Arc::new(sink))
         }
-        PublisherEndpointType::StaticResponse(cfg) => Ok(Arc::new(
-            static_response::StaticResponsePublisher::new(cfg)?,
+        PublisherEndpointType::Static(cfg) => Ok(Arc::new(
+            static_endpoint::StaticEndpointPublisher::new(cfg)?,
         )),
     }
 }

@@ -181,11 +181,11 @@ Beyond running as a standalone application, mq-multi-bridge can be used as a lib
 
 ### 1. Implement a Custom Source or Sink 
 You can create your own sources and sinks by implementing the MessageSource and MessageSink traits. 
-```rust 
-use mq_multi_bridge::MessagePublisher;
+```rust
+use mq_multi_bridge::publishers::MessagePublisher;
 use mq_multi_bridge::model::CanonicalMessage;
 use async_trait::async_trait;
-use std::any::Any;
+use std::{any::Any, time::Duration};
 
 // A simple in-memory sink for demonstration 
 #[derive(Clone)]
@@ -199,6 +199,11 @@ impl MessagePublisher for MyCustomSink {
     // Return Ok(None) for one-way sinks
     Ok(None)
   }
+  async fn flush(&self) -> anyhow::Result<()> {
+    // For in-memory sinks, this can be a no-op.
+    // For sinks with buffers, this is where you'd ensure all messages are sent.
+    Ok(())
+  }
   fn as_any(&self) -> &dyn Any {
     self
   }
@@ -210,35 +215,32 @@ Use the Bridge struct to configure your application. You can mix and match conne
 ```rust,ignore
 use mq_multi_bridge::Bridge;
 use mq_multi_bridge::config::{load_config, Config};
-use mq_multi_bridge::MessageConsumer;
-use mq_multi_bridge::http::HttpConsumer; // Using a built-in source for the example
+use mq_multi_bridge::consumers::MessageConsumer;
+use mq_multi_bridge::endpoints::http::HttpConsumer; // Using a built-in source for the example
 use std::sync::Arc;
 
 // Assuming MyCustomSink from the example above
 // use crate::my_sinks::MyCustomSink;
 async fn run_custom_bridge() -> anyhow::Result<()> {
   // Load base configuration from file/env
-  let config: Config = load_config()?;
-  let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+  let config: Config = load_config().unwrap_or_default();
   
   // Create a bridge
-  let mut bridge = Bridge::from_config(config, shutdown_rx)?;
-  
-  // Initialize routes from config
-  bridge.initialize_from_config().await?;
+  let mut bridge = Bridge::new(config);
+  let shutdown_tx = bridge.get_shutdown_handle();
   
   // Create an instance of a source (can be custom or built-in)
   let source_config = mq_multi_bridge::config::HttpConfig { 
       listen_address: Some("0.0.0.0:9000".to_string()), 
       ..Default::default() 
   };
-  let my_source: Arc<dyn MessageConsumer> = Arc::new(HttpConsumer::new(&source_config).await?);
+  let my_source = Arc::new(tokio::sync::Mutex::new(HttpConsumer::new(&source_config).await?));
   
   // Create an instance of your custom sink
   let my_sink = Arc::new(MyCustomSink { /* ... */ });
   
   // Add the custom route to the bridge
-  bridge.add_custom_route("http-to-custom", my_source, my_sink, None).await?;
+  bridge.add_route("http-to-custom", my_source, my_sink, None, true).await?;
 
   // Run the bridge
   bridge.run().await 

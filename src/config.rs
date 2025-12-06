@@ -115,7 +115,7 @@ pub enum ConnectionType {
     Mqtt(MqttConfig),
     File(FileConfig),
     Http(HttpConfig),
-    StaticResponse(StaticResponseEndpoint),
+    Static(StaticEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -148,7 +148,7 @@ pub struct HttpEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct StaticResponseEndpoint {
+pub struct StaticEndpoint {
     #[serde(default = "default_static_response_content")]
     pub content: String,
 }
@@ -202,7 +202,7 @@ pub enum PublisherEndpointType {
     Mqtt(MqttPublisherEndpoint),
     File(FilePublisherEndpoint),
     Http(HttpPublisherEndpoint),
-    StaticResponse(StaticResponseEndpoint),
+    Static(StaticEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -224,6 +224,7 @@ pub enum ConsumerEndpointType {
     Mqtt(MqttConsumerEndpoint),
     File(FileConsumerEndpoint),
     Http(HttpConsumerEndpoint),
+    Static(StaticEndpoint),
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
