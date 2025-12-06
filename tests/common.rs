@@ -432,8 +432,22 @@ pub async fn measure_write_performance(
         let publisher_clone = publisher.clone();
         tasks.spawn(async move {
             while let Ok(message) = rx_clone.recv().await {
-                if let Err(e) = publisher_clone.send(message).await {
-                    eprintln!("Error sending message: {}", e);
+                // Loop to retry sending the message in case of backpressure.
+                // This is common with async clients like rumqttc where the internal
+                // buffer can fill up under high load.
+                let mut first_try = true;
+                loop {
+                    let res = publisher_clone.send(message.clone()).await;
+                    if let Err(e) = res {
+                        if first_try {
+                            eprintln!("Error sending message: {}", e);
+                        }
+                        first_try = false;
+                    } else {
+                        break;
+                    }
+                    // Backpressure detected, yield and retry.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             }
         });
