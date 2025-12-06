@@ -10,8 +10,14 @@ pub struct KafkaConfig {
     pub group_id: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
     #[serde(default)]
     pub tls: ClientTlsConfig,
+    #[serde(default)]
+    pub producer_options: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub consumer_options: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -41,10 +47,10 @@ pub struct NatsConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub token: Option<String>,
-    pub default_stream: Option<String>,
     #[serde(default = "default_true")]
     pub await_ack: bool,
+    pub token: Option<String>,
+    pub default_stream: Option<String>,
     #[serde(flatten, default)]
     pub tls: ClientTlsConfig,
 }
@@ -52,12 +58,12 @@ pub struct NatsConfig {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AmqpConfig {
     pub url: String,
-    #[serde(flatten, default)]
-    pub tls: ClientTlsConfig,
     pub username: Option<String>,
     pub password: Option<String>,
     #[serde(default = "default_true")]
     pub await_ack: bool,
+    #[serde(flatten, default)]
+    pub tls: ClientTlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]

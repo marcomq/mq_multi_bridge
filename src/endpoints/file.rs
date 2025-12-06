@@ -3,18 +3,18 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
 use crate::config::FileConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 /// A sink that writes messages to a file, one per line.
@@ -98,7 +98,7 @@ impl FileConsumer {
 #[async_trait]
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         let mut line = String::new();
 
         let bytes_read = self.reader.read_line(&mut line).await?;
@@ -123,7 +123,13 @@ impl MessageConsumer for FileConsumer {
 
 #[cfg(test)]
 mod tests {
-    use crate::{config::FileConfig, consumers::MessageConsumer, endpoints::file::{FileConsumer, FilePublisher}, model::CanonicalMessage, publishers::MessagePublisher};
+    use crate::{
+        config::FileConfig,
+        consumers::MessageConsumer,
+        endpoints::file::{FileConsumer, FilePublisher},
+        model::CanonicalMessage,
+        publishers::MessagePublisher,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 

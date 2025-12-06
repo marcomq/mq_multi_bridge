@@ -8,7 +8,7 @@ use crate::route_runner::{RouteRunner, RouteRunnerCommand};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 

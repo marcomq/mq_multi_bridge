@@ -1,5 +1,5 @@
 use crate::config::NatsConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
@@ -147,7 +147,7 @@ impl NatsConsumer {
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         let message = futures::StreamExt::next(&mut self.subscription)
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;

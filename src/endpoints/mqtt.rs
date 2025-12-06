@@ -1,5 +1,5 @@
 use crate::config::MqttConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
@@ -34,6 +34,10 @@ impl MqttPublisher {
             _eventloop_handle: self._eventloop_handle.clone(),
         }
     }
+
+    pub async fn disconnect(&self) -> Result<(), rumqttc::ClientError> {
+        self.client.disconnect().await
+    }
 }
 
 #[async_trait]
@@ -47,18 +51,6 @@ impl MessagePublisher for MqttPublisher {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl Drop for MqttPublisher {
-    fn drop(&mut self) {
-        // To ensure all buffered messages are sent before the client is dropped,
-        // we spawn a task to perform a graceful disconnect. This is crucial for sinks
-        // that might be dropped immediately after sending, like in a file-to-broker scenario.
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let _ = client.disconnect().await;
-        });
     }
 }
 
@@ -125,8 +117,10 @@ impl Drop for MqttConsumer {
 
 #[async_trait]
 impl MessageConsumer for MqttConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let p = self.message_rx.recv()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let p = self
+            .message_rx
+            .recv()
             .await
             .ok_or_else(|| anyhow!("MQTT source channel closed"))?;
 

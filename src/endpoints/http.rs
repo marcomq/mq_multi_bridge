@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
 use crate::config::HttpConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
@@ -13,7 +13,9 @@ use axum::{
     body::Bytes,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response}, routing::post, Router,
+    response::{IntoResponse, Response},
+    routing::post,
+    Router,
 };
 use axum_server::{tls_rustls::RustlsConfig, Handle};
 use std::any::Any;
@@ -84,16 +86,16 @@ impl HttpConsumer {
         });
 
         ready_rx.await?;
-        Ok(Self {
-            request_rx,
-        })
+        Ok(Self { request_rx })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let (message, response_tx) = self.request_rx.recv()
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let (message, response_tx) = self
+            .request_rx
+            .recv()
             .await
             .ok_or_else(|| anyhow!("HTTP source channel closed"))?;
 
@@ -131,14 +133,12 @@ async fn handle_request(
     }
 
     match response_rx.await {
-        Ok(Ok(Some(response_message))) => {
-            (
-                StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                response_message.payload,
-            )
-                .into_response()
-        }
+        Ok(Ok(Some(response_message))) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            response_message.payload,
+        )
+            .into_response(),
         Ok(Ok(None)) => (StatusCode::ACCEPTED, "Message processed").into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,

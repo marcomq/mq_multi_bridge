@@ -74,7 +74,7 @@ impl RouteRunner {
                 || create_publisher_from_route(&name, &route.out),
                 &mut shutdown_rx,
             )
-                .await
+            .await
             {
                 Some(p) => p,
                 None => return, // Shutdown was triggered
@@ -87,7 +87,7 @@ impl RouteRunner {
                     || create_dlq_from_route(&route, name.as_str()),
                     &mut shutdown_rx,
                 )
-                    .await
+                .await
                 {
                     Some(Some(d)) => Some(d), // Successfully connected to DLQ
                     Some(None) => None, // Should not happen if dlq is configured, but handle it.
@@ -103,7 +103,7 @@ impl RouteRunner {
                 || create_consumer_from_route(&name, &route.r#in),
                 &mut shutdown_rx,
             )
-                .await
+            .await
             {
                 Some(c) => c,
                 None => return, // Shutdown was triggered

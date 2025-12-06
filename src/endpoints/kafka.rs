@@ -1,9 +1,11 @@
 use crate::config::KafkaConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
+use async_stream::stream;
 use async_trait::async_trait;
+use futures::stream::{Stream, StreamExt};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
@@ -12,12 +14,15 @@ use rdkafka::{
     error::RDKafkaErrorCode,
     ClientConfig, Message, TopicPartitionList,
 };
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 
 pub struct KafkaPublisher {
     producer: FutureProducer,
     topic: String,
+    await_ack: bool,
 }
 
 impl KafkaPublisher {
@@ -58,6 +63,13 @@ impl KafkaPublisher {
             client_config.set("security.protocol", "sasl_ssl");
         }
 
+        // Apply custom producer options, allowing overrides of defaults
+        if let Some(options) = &config.producer_options {
+            for (key, value) in options {
+                client_config.set(key, value);
+            }
+        }
+
         // Create the topic if it doesn't exist
         if !topic.is_empty() {
             let admin_client: AdminClient<_> = client_config.create()?;
@@ -92,6 +104,7 @@ impl KafkaPublisher {
         Ok(Self {
             producer,
             topic: topic.to_string(),
+            await_ack: config.await_ack,
         })
     }
 
@@ -99,6 +112,7 @@ impl KafkaPublisher {
         Self {
             producer: self.producer.clone(),
             topic: topic.to_string(),
+            await_ack: self.await_ack,
         }
     }
 }
@@ -120,13 +134,26 @@ impl Drop for KafkaPublisher {
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let key = message.message_id.to_string();
-        let record = FutureRecord::to(&self.topic).payload(&message.payload).key(&key);
+        let record = FutureRecord::to(&self.topic)
+            .payload(&message.payload)
+            .key(&key);
 
-        // This will await the delivery report from Kafka, providing at-least-once guarantees.
-        // The RouteRunner's concurrency will hide this latency.
-        self.producer.send(record, Duration::from_secs(0)).await
-            .map_err(|(e, _)| anyhow!("Kafka message delivery failed: {}", e))?;
-
+        if self.await_ack {
+            // Await the delivery report from Kafka, providing at-least-once guarantees per message.
+            self.producer
+                .send(record, Duration::from_secs(0))
+                .await
+                .map_err(|(e, _)| anyhow!("Kafka message delivery failed: {}", e))?;
+        } else {
+            // "Fire and forget" send. This enqueues the message in the producer's buffer.
+            // The `FutureProducer` will handle sending it in the background according to the
+            // `linger.ms` and other batching settings. We don't await the delivery report
+            // here to achieve high throughput. The `flush()` in `Drop` ensures all messages
+            // are sent before shutdown.
+            if let Err((e, _)) = self.producer.send_result(record) {
+                return Err(anyhow!("Failed to enqueue Kafka message: {}", e));
+            }
+        }
         Ok(None)
     }
 
@@ -142,12 +169,23 @@ impl MessagePublisher for KafkaPublisher {
 }
 
 pub struct KafkaConsumer {
-    consumer: std::sync::Arc<StreamConsumer>,
+    // The consumer needs to be stored to keep the connection alive.
+    consumer: Arc<StreamConsumer>,
+    // The stream is created from the consumer and wrapped in a Mutex for safe access.
+    stream: Mutex<
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>,
+                    > + Send,
+            >,
+        >,
+    >,
 }
 use std::any::Any;
 
 impl KafkaConsumer {
-    pub fn new(config: &KafkaConfig, topic: &str) -> Result<Self, rdkafka::error::KafkaError> {
+    pub fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         use std::sync::Arc;
         let mut client_config = ClientConfig::new();
         if let Some(group_id) = &config.group_id {
@@ -184,6 +222,13 @@ impl KafkaConsumer {
             client_config.set("security.protocol", "sasl_ssl");
         }
 
+        // Apply custom consumer options
+        if let Some(options) = &config.consumer_options {
+            for (key, value) in options {
+                client_config.set(key, value);
+            }
+        }
+
         let consumer: StreamConsumer = client_config.create()?;
         if !topic.is_empty() {
             consumer.subscribe(&[topic])?;
@@ -191,16 +236,37 @@ impl KafkaConsumer {
             info!(topic = %topic, "Kafka source subscribed");
         }
 
+        // Wrap the consumer in an Arc to allow it to be shared.
+        let consumer = Arc::new(consumer);
+        // Create a stream that loops, calling `recv()` on the consumer.
+        // This avoids the complex lifetime issues with `consumer.stream()`.
+        let stream = {
+            let consumer = consumer.clone();
+            stream! {
+                loop {
+                    yield consumer.recv().await.map(|m| m.detach());
+                }
+            }
+        }
+        .boxed();
+
         Ok(Self {
-            consumer: Arc::new(consumer),
+            consumer,
+            stream: Mutex::new(stream),
         })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let message = self.consumer.recv().await?;
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let message = self
+            .stream
+            .get_mut()
+            .unwrap()
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("Kafka consumer stream ended"))??;
 
         let payload = message
             .payload()
@@ -209,7 +275,7 @@ impl MessageConsumer for KafkaConsumer {
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
-        let consumer = std::sync::Arc::clone(&self.consumer);
+        let consumer = self.consumer.clone();
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(
             message.topic(),
@@ -218,9 +284,9 @@ impl MessageConsumer for KafkaConsumer {
         )?;
         let commit = Box::new(move |_response: Option<CanonicalMessage>| {
             Box::pin(async move {
-                consumer
-                    .commit(&tpl, CommitMode::Async)
-                    .unwrap_or_else(|e| tracing::error!("Failed to commit Kafka message: {:?}", e));
+                if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                    tracing::error!("Failed to commit Kafka message: {:?}", e);
+                }
             }) as BoxFuture<'static, ()>
         });
 

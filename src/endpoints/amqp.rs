@@ -1,5 +1,5 @@
 use crate::config::AmqpConfig;
-use crate::consumers::{BoxFuture, BoxedMessageStream, MessageConsumer};
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
@@ -10,7 +10,8 @@ use lapin::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
         QueueDeclareOptions,
     },
-    types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
+    types::FieldTable,
+    BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
 use std::time::Duration;
 use tracing::{debug, info};
@@ -62,7 +63,8 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let confirmation = self.channel
+        let confirmation = self
+            .channel
             .basic_publish(
                 &self.exchange,
                 &self.routing_key,
@@ -116,9 +118,7 @@ impl AmqpConsumer {
             )
             .await?;
 
-        Ok(Self {
-            consumer,
-        })
+        Ok(Self { consumer })
     }
 }
 
@@ -182,7 +182,7 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 
 #[async_trait]
 impl MessageConsumer for AmqpConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         let delivery = futures::StreamExt::next(&mut self.consumer)
             .await
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;

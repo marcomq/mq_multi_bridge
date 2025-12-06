@@ -1,11 +1,12 @@
 // cargo test --test integration_test --features integration-test --release -- --ignored --nocapture --test-threads=1 --show-output
 
-use config::File as ConfigFile; // Use an alias for the File type from the config crate
 use async_channel::{bounded, Receiver, Sender};
+use chrono;
+use config::File as ConfigFile; // Use an alias for the File type from the config crate
 use ctor::{ctor, dtor};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use metrics_util::MetricKind;
 use mq_multi_bridge::config::Config as AppConfig; // Use an alias for our app's config struct
-use mq_multi_bridge::model::CanonicalMessage;
-use mq_multi_bridge::publishers::MessagePublisher;
 use mq_multi_bridge::consumers::MessageConsumer;
 use mq_multi_bridge::endpoints::{
     amqp::{AmqpConsumer, AmqpPublisher},
@@ -14,19 +15,18 @@ use mq_multi_bridge::endpoints::{
     mqtt::{MqttConsumer, MqttPublisher},
     nats::{NatsConsumer, NatsPublisher},
 };
+use mq_multi_bridge::model::CanonicalMessage;
+use mq_multi_bridge::publishers::MessagePublisher;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-use metrics_util::MetricKind;
 use tracing_appender::non_blocking::WorkerGuard;
-use chrono;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -60,9 +60,15 @@ impl TestMetrics {
         let mut cumulative_counters = self.cumulative_counters.lock().unwrap();
         for (key, _, _, value) in snapshot.into_vec() {
             if key.kind() == MetricKind::Counter && key.key().name() == name {
-                if key.key().labels().any(|l| l.key() == "route" && l.value() == route) {
+                if key
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "route" && l.value() == route)
+                {
                     // Add the delta from this snapshot to the cumulative total
-                    let entry = cumulative_counters.entry((name.to_string(), route.to_string())).or_insert(0);
+                    let entry = cumulative_counters
+                        .entry((name.to_string(), route.to_string()))
+                        .or_insert(0);
                     if let DebugValue::Counter(delta_value) = value {
                         *entry += delta_value;
                     }
@@ -70,7 +76,9 @@ impl TestMetrics {
             }
         }
         // Return the current cumulative total for the requested metric
-        *cumulative_counters.get(&(name.to_string(), route.to_string())).unwrap_or(&0)
+        *cumulative_counters
+            .get(&(name.to_string(), route.to_string()))
+            .unwrap_or(&0)
     }
 }
 
@@ -130,8 +138,8 @@ fn read_output_file(path: &std::path::Path) -> HashSet<String> {
             continue;
         }
         // The file contains the JSON representation of the payload, not the whole message
-        let payload: Value =
-            serde_json::from_str(&line).unwrap_or_else(|_| panic!("Failed to parse line: {}", line));
+        let payload: Value = serde_json::from_str(&line)
+            .unwrap_or_else(|_| panic!("Failed to parse line: {}", line));
         let msg = CanonicalMessage::from_json(payload).unwrap();
         received_messages.insert(msg.message_id.to_string());
     }
@@ -212,9 +220,13 @@ async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
 
     while start_time.elapsed() < timeout {
         // We poll the "sent" counter of the route that writes to the file.
-        let sent_count = metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
+        let sent_count =
+            metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
         if sent_count >= num_messages as u64 {
-            println!("[{}] Metrics show {} messages sent. Proceeding to verification.", broker_name, sent_count);
+            println!(
+                "[{}] Metrics show {} messages sent. Proceeding to verification.",
+                broker_name, sent_count
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -322,9 +334,13 @@ async fn run_performance_pipeline_test(
     let timeout = Duration::from_secs(40);
     while start_time.elapsed() < timeout {
         // We poll the "sent" counter of the route that writes to the file, accumulating its value.
-        let sent_count = metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
+        let sent_count =
+            metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
         if sent_count >= num_messages as u64 {
-            println!("[{}] Metrics show {} messages sent. Proceeding to verification.", broker_name, sent_count);
+            println!(
+                "[{}] Metrics show {} messages sent. Proceeding to verification.",
+                broker_name, sent_count
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -333,7 +349,7 @@ async fn run_performance_pipeline_test(
     // Poll the output file until all messages are received or we time out.
 
     let received_ids = read_output_file(&output_path);
-    assert_eq!(received_ids.len(), num_messages, 
+    assert_eq!(received_ids.len(), num_messages,
         "TEST FAILED for [{}]: The set of received message IDs does not match the set of sent message IDs.", broker_name);
     let duration = start_time.elapsed();
     if shutdown_tx.send(()).is_err() {
@@ -373,7 +389,8 @@ async fn run_performance_pipeline_test(
 const PERF_TEST_CONCURRENCY: usize = 100;
 
 fn generate_message() -> CanonicalMessage {
-    CanonicalMessage::from_json(json!({ "perf_test": true, "ts": chrono::Utc::now().to_rfc3339() })).unwrap()
+    CanonicalMessage::from_json(json!({ "perf_test": true, "ts": chrono::Utc::now().to_rfc3339() }))
+        .unwrap()
 }
 
 async fn measure_write_performance(
@@ -727,7 +744,13 @@ async fn performance_test_file_direct() {
     };
 
     let publisher = Arc::new(FilePublisher::new(&config).await.unwrap());
-    measure_write_performance("File", publisher.clone(), PERF_TEST_MESSAGE_COUNT, PERF_TEST_CONCURRENCY).await;
+    measure_write_performance(
+        "File",
+        publisher.clone(),
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
 
     // Crucial: Drop the publisher and flush to ensure all data is written and file handle is released
     // before the consumer tries to open it.
@@ -748,7 +771,13 @@ async fn performance_test_kafka_direct() {
     };
 
     let publisher = Arc::new(KafkaPublisher::new(&config, &topic).await.unwrap());
-    measure_write_performance("Kafka", publisher, PERF_TEST_MESSAGE_COUNT, PERF_TEST_CONCURRENCY).await;
+    measure_write_performance(
+        "Kafka",
+        publisher,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
 
     // Give Kafka time to process publishes before subscribing
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -771,14 +800,28 @@ async fn performance_test_nats_direct() {
 
     // The publisher will create the stream if it doesn't exist.
     // We pass the specific subject for publishing.
-    let publisher = Arc::new(NatsPublisher::new(&config, &subject, Some(stream_name)).await.unwrap());
-    measure_write_performance("NATS", publisher, PERF_TEST_MESSAGE_COUNT, PERF_TEST_CONCURRENCY).await;
+    let publisher = Arc::new(
+        NatsPublisher::new(&config, &subject, Some(stream_name))
+            .await
+            .unwrap(),
+    );
+    measure_write_performance(
+        "NATS",
+        publisher,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
 
     // Give NATS time to process publishes before subscribing
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // The consumer will subscribe to the specific subject within the existing stream.
-    let consumer = Arc::new(Mutex::new(NatsConsumer::new(&config, stream_name, &subject).await.unwrap()));
+    let consumer = Arc::new(Mutex::new(
+        NatsConsumer::new(&config, stream_name, &subject)
+            .await
+            .unwrap(),
+    ));
     measure_read_performance("NATS", consumer, PERF_TEST_MESSAGE_COUNT).await;
 }
 
@@ -792,12 +835,20 @@ async fn performance_test_amqp_direct() {
     };
 
     let publisher = Arc::new(AmqpPublisher::new(&config, &queue).await.unwrap());
-    measure_write_performance("AMQP", publisher, PERF_TEST_MESSAGE_COUNT, PERF_TEST_CONCURRENCY).await;
+    measure_write_performance(
+        "AMQP",
+        publisher,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
 
     // Give AMQP time to process publishes before subscribing
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    let consumer = Arc::new(Mutex::new(AmqpConsumer::new(&config, &queue).await.unwrap()));
+    let consumer = Arc::new(Mutex::new(
+        AmqpConsumer::new(&config, &queue).await.unwrap(),
+    ));
     measure_read_performance("AMQP", consumer, PERF_TEST_MESSAGE_COUNT).await;
 }
 
@@ -810,13 +861,25 @@ async fn performance_test_mqtt_direct() {
         ..Default::default()
     };
 
-    let publisher = Arc::new(MqttPublisher::new(&config, &topic, bridge_id).await.unwrap());
-    measure_write_performance("MQTT", publisher, PERF_TEST_MESSAGE_COUNT, PERF_TEST_CONCURRENCY).await;
+    let publisher = Arc::new(
+        MqttPublisher::new(&config, &topic, bridge_id)
+            .await
+            .unwrap(),
+    );
+    measure_write_performance(
+        "MQTT",
+        publisher,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
 
     // Give broker time to process publishes before subscribing
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let consumer = Arc::new(Mutex::new(MqttConsumer::new(&config, &topic, bridge_id).await.unwrap()));
+    let consumer = Arc::new(Mutex::new(
+        MqttConsumer::new(&config, &topic, bridge_id).await.unwrap(),
+    ));
     measure_read_performance("MQTT", consumer, PERF_TEST_MESSAGE_COUNT).await;
 }
 

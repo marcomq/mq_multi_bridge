@@ -57,7 +57,9 @@ pub async fn create_consumer_from_route(
                 mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
             ))
         }
-        ConsumerEndpointType::File(cfg) => Ok(Box::new(file::FileConsumer::new(&cfg.config).await?)),
+        ConsumerEndpointType::File(cfg) => {
+            Ok(Box::new(file::FileConsumer::new(&cfg.config).await?))
+        }
         ConsumerEndpointType::Http(cfg) => {
             Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?))
         }
