@@ -38,7 +38,10 @@ fn init_logging(config: &Config) {
         "json" => {
             logger.json().init();
         }
-        "plain" | _ => {
+        "plain" => {
+            logger.init();
+        }
+         _ => {
             logger.init();
         }
     }

@@ -178,6 +178,7 @@ impl RouteRunner {
     }
 
     /// The main loop for receiving, processing, and acknowledging messages.
+    #[allow(clippy::too_many_arguments)]
     async fn process_messages(
         name: &str,
         route: &Route,
@@ -258,14 +259,13 @@ impl RouteRunner {
                             let msg_id = message.message_id;
                             let start_time = std::time::Instant::now();
 
-                            if deduplication_enabled {
-                                if dedup.is_duplicate(&msg_id).unwrap_or(false) {
+                            if deduplication_enabled
+                                && dedup.is_duplicate(&msg_id).unwrap_or(false) {
                                     trace!(%msg_id, "Duplicate message, skipping.");
                                     counter!("bridge_messages_duplicate_total", "route" => route_name.clone()).increment(1);
                                     commit_fn(None).await; // Acknowledge the duplicate
                                     continue;
                                 }
-                            }
 
                             counter!("bridge_messages_received_total", "route" => route_name.clone()).increment(1);
 

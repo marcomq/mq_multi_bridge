@@ -168,19 +168,14 @@ impl MessagePublisher for KafkaPublisher {
     }
 }
 
+type KafkaMessageStream =
+    Pin<Box<dyn Stream<Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>> + Send>>;
+
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<StreamConsumer>,
     // The stream is created from the consumer and wrapped in a Mutex for safe access.
-    stream: Mutex<
-        Pin<
-            Box<
-                dyn Stream<
-                        Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>,
-                    > + Send,
-            >,
-        >,
-    >,
+    stream: Mutex<KafkaMessageStream>,
 }
 use std::any::Any;
 

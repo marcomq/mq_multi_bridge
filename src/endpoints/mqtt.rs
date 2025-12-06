@@ -164,7 +164,7 @@ async fn create_client_and_eventloop(
             let mut ca_buf = std::io::BufReader::new(std::fs::File::open(ca_file)?);
             let certs = rustls_pemfile::certs(&mut ca_buf).collect::<Result<Vec<_>, _>>()?;
             for cert in certs {
-                root_cert_store.add(cert.into())?;
+                root_cert_store.add(cert)?;
             }
         }
 
