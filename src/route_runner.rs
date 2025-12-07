@@ -191,16 +191,23 @@ impl RouteRunner {
     ) -> Result<(), (anyhow::Error, mpsc::Receiver<RouteRunnerCommand>)> {
         let concurrency = route.concurrency.unwrap_or(10);
 
-        // Ensure we are always working with a buffered consumer for performance.
-        let consumer = if consumer.as_any().is::<crate::consumers::BufferedConsumer>() {
+        // For I/O-bound consumers, wrap them in a BufferedConsumer to pre-fetch
+        // messages and improve performance. For in-memory consumers, which are
+        // already fast, adding another buffer is unnecessary overhead.
+        let consumer = if consumer.as_any().is::<crate::endpoints::memory::MemoryConsumer>() {
+            info!("Using direct MemoryConsumer for maximum performance.");
             consumer
         } else {
-            info!("Wrapping consumer in a BufferedConsumer for improved performance.");
-            // Use concurrency * 2 as a heuristic for a good buffer size.
-            Box::new(crate::consumers::BufferedConsumer::new(
-                consumer,
-                concurrency * 2,
-            ))
+            if consumer.as_any().is::<crate::consumers::BufferedConsumer>() {
+                consumer
+            } else {
+                info!("Wrapping I/O-bound consumer in a BufferedConsumer for improved performance.");
+                // Use concurrency * 2 as a heuristic for a good buffer size.
+                Box::new(crate::consumers::BufferedConsumer::new(
+                    consumer,
+                    concurrency * 2,
+                ))
+            }
         };
 
         let consumer = Arc::new(Mutex::new(consumer));
