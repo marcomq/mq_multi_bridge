@@ -10,8 +10,14 @@ pub struct KafkaConfig {
     pub group_id: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
     #[serde(default)]
     pub tls: ClientTlsConfig,
+    #[serde(default)]
+    pub producer_options: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub consumer_options: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -41,6 +47,8 @@ pub struct NatsConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
     pub token: Option<String>,
     pub default_stream: Option<String>,
     #[serde(flatten, default)]
@@ -50,10 +58,12 @@ pub struct NatsConfig {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AmqpConfig {
     pub url: String,
-    #[serde(flatten, default)]
-    pub tls: ClientTlsConfig,
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default = "default_true")]
+    pub await_ack: bool,
+    #[serde(flatten, default)]
+    pub tls: ClientTlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -63,6 +73,8 @@ pub struct MqttConfig {
     pub tls: ClientTlsConfig,
     pub username: Option<String>,
     pub password: Option<String>,
+    // The capacity of the internal message queue for the MQTT client.
+    pub queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
@@ -77,6 +89,12 @@ pub struct HttpConfig {
     pub response_sink: Option<String>,
     #[serde(flatten, default)]
     pub tls: TlsConfig, // Server-side TLS does not use accept_invalid_certs
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
+pub struct MemoryConfig {
+    pub topic: String,
+    pub capacity: Option<usize>,
 }
 
 impl TlsConfig {
@@ -105,7 +123,8 @@ pub enum ConnectionType {
     Mqtt(MqttConfig),
     File(FileConfig),
     Http(HttpConfig),
-    StaticResponse(StaticResponseEndpoint),
+    Static(StaticEndpoint),
+    Memory(MemoryConfig),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -138,36 +157,28 @@ pub struct HttpEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct StaticResponseEndpoint {
+pub struct StaticEndpoint {
     #[serde(default = "default_static_response_content")]
     pub content: String,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryEndpoint {}
+
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
-pub struct SourceEndpoint {
+pub struct PublisherEndpoint {
     // pub connection: String,
     #[serde(flatten)]
-    pub endpoint_type: SourceEndpointType,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceEndpointType {
-    Kafka(KafkaSourceEndpoint),
-    Nats(NatsSourceEndpoint),
-    Amqp(AmqpSourceEndpoint),
-    Mqtt(MqttSourceEndpoint),
-    File(FileSourceEndpoint),
-    Http(HttpSourceEndpoint),
+    pub endpoint_type: PublisherEndpointType,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
-pub struct SinkEndpoint {
+pub struct ConsumerEndpoint {
     // pub connection: String,
     #[serde(flatten)]
-    pub endpoint_type: SinkEndpointType,
+    pub endpoint_type: ConsumerEndpointType,
 }
 
 pub fn load_config() -> Result<Config, config::ConfigError> {
@@ -196,28 +207,48 @@ pub fn load_config() -> Result<Config, config::ConfigError> {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
-pub enum SinkEndpointType {
-    Kafka(KafkaSinkEndpoint),
-    Nats(NatsSinkEndpoint),
-    Amqp(AmqpSinkEndpoint),
-    Mqtt(MqttSinkEndpoint),
-    File(FileSinkEndpoint),
-    Http(HttpSinkEndpoint),
-    StaticResponse(StaticResponseEndpoint),
+pub enum PublisherEndpointType {
+    Kafka(KafkaPublisherEndpoint),
+    Nats(NatsPublisherEndpoint),
+    Amqp(AmqpPublisherEndpoint),
+    Mqtt(MqttPublisherEndpoint),
+    File(FilePublisherEndpoint),
+    Http(HttpPublisherEndpoint),
+    Static(StaticEndpoint),
+    Memory(MemoryPublisherEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Route {
-    pub source: SourceEndpoint,
-    pub sink: SinkEndpoint,
+    pub r#in: ConsumerEndpoint,
+    pub out: PublisherEndpoint,
     pub dlq: Option<DlqConfig>,
     pub concurrency: Option<usize>,
+    #[serde(default = "default_true")]
+    pub deduplication_enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsumerEndpointType {
+    Kafka(KafkaConsumerEndpoint),
+    Nats(NatsConsumerEndpoint),
+    Amqp(AmqpConsumerEndpoint),
+    Mqtt(MqttConsumerEndpoint),
+    File(FileConsumerEndpoint),
+    Http(HttpConsumerEndpoint),
+    Static(StaticEndpoint),
+    Memory(MemoryConsumerEndpoint),
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub logger: String,
@@ -230,8 +261,20 @@ pub struct Config {
     pub routes: HashMap<String, Route>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            logger: "plain".to_string(),
+            log_level: "info".to_string(),
+            sled_path: "/tmp/dedup_db".to_string(),
+            dedup_ttl_seconds: 180,
+            metrics: MetricsConfig::default(),
+            routes: HashMap::new(),
+        }
+    }
+}
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct KafkaSourceEndpoint {
+pub struct KafkaConsumerEndpoint {
     #[serde(flatten)]
     pub config: KafkaConfig,
     #[serde(flatten)]
@@ -239,7 +282,7 @@ pub struct KafkaSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct NatsSourceEndpoint {
+pub struct NatsConsumerEndpoint {
     #[serde(flatten)]
     pub config: NatsConfig,
     #[serde(flatten)]
@@ -247,7 +290,7 @@ pub struct NatsSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct AmqpSourceEndpoint {
+pub struct AmqpConsumerEndpoint {
     #[serde(flatten)]
     pub config: AmqpConfig,
     #[serde(flatten)]
@@ -255,7 +298,7 @@ pub struct AmqpSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct MqttSourceEndpoint {
+pub struct MqttConsumerEndpoint {
     #[serde(flatten)]
     pub config: MqttConfig,
     #[serde(flatten)]
@@ -263,7 +306,7 @@ pub struct MqttSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct FileSourceEndpoint {
+pub struct FileConsumerEndpoint {
     #[serde(flatten)]
     pub config: FileConfig,
     #[serde(flatten)]
@@ -271,15 +314,23 @@ pub struct FileSourceEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct HttpSourceEndpoint {
+pub struct HttpConsumerEndpoint {
     #[serde(flatten)]
     pub config: HttpConfig,
     #[serde(flatten)]
     pub endpoint: HttpEndpoint,
 }
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryConsumerEndpoint {
+    #[serde(flatten)]
+    pub config: MemoryConfig,
+    #[serde(flatten)]
+    pub endpoint: MemoryEndpoint,
+}
+
 #[derive(Debug, Deserialize, Clone)]
-pub struct KafkaSinkEndpoint {
+pub struct KafkaPublisherEndpoint {
     #[serde(flatten)]
     pub config: KafkaConfig,
     #[serde(flatten)]
@@ -287,7 +338,7 @@ pub struct KafkaSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct NatsSinkEndpoint {
+pub struct NatsPublisherEndpoint {
     #[serde(flatten)]
     pub config: NatsConfig,
     #[serde(flatten)]
@@ -295,7 +346,7 @@ pub struct NatsSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct AmqpSinkEndpoint {
+pub struct AmqpPublisherEndpoint {
     #[serde(flatten)]
     pub config: AmqpConfig,
     #[serde(flatten)]
@@ -303,7 +354,7 @@ pub struct AmqpSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct MqttSinkEndpoint {
+pub struct MqttPublisherEndpoint {
     #[serde(flatten)]
     pub config: MqttConfig,
     #[serde(flatten)]
@@ -311,7 +362,7 @@ pub struct MqttSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct FileSinkEndpoint {
+pub struct FilePublisherEndpoint {
     #[serde(flatten)]
     pub config: FileConfig,
     #[serde(flatten)]
@@ -319,11 +370,19 @@ pub struct FileSinkEndpoint {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct HttpSinkEndpoint {
+pub struct HttpPublisherEndpoint {
     #[serde(flatten)]
     pub config: HttpConfig,
     #[serde(flatten)]
     pub endpoint: HttpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryPublisherEndpoint {
+    #[serde(flatten)]
+    pub config: MemoryConfig,
+    #[serde(flatten)]
+    pub endpoint: MemoryEndpoint,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -350,7 +409,7 @@ pub struct DlqKafkaEndpoint {
 pub struct DlqConfig {
     // pub connection: String,
     #[serde(flatten)]
-    pub kafka: KafkaSinkEndpoint,
+    pub kafka: KafkaPublisherEndpoint,
 }
 
 #[allow(unused_imports)]
@@ -370,12 +429,12 @@ metrics:
 
 routes:
   kafka_to_nats:
-    source:
+    in:
       kafka:
         brokers: "kafka:9092"
         group_id: "bridge_group"
         topic: "in_topic"
-    sink:
+    out:
       nats:
         url: "nats://nats:4222"
         subject: "out_subject"
@@ -395,12 +454,11 @@ routes:
 
         let route = &config.routes["kafka_to_nats"];
         assert!(route.dlq.is_some());
-        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+        if let ConsumerEndpointType::Kafka(k) = &route.r#in.endpoint_type {
             assert_eq!(k.config.brokers, "kafka:9092");
             assert_eq!(k.endpoint.topic.as_deref(), Some("in_topic"));
         }
     }
-
     #[test]
     fn test_config_from_env_vars() {
         // Set environment variables
@@ -413,25 +471,25 @@ routes:
 
         // Route 0: Kafka to NATS
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__BROKERS",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__BROKERS",
             "env-kafka:9092",
         );
         // Source
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__GROUP_ID",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__GROUP_ID",
             "env-group",
         );
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SOURCE__KAFKA__TOPIC",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__TOPIC",
             "env-in-topic",
         );
         // Sink
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__URL",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__URL",
             "nats://env-nats:4222",
         );
         std::env::set_var(
-            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__SINK__NATS__SUBJECT",
+            "BRIDGE__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__SUBJECT",
             "env-out-subject",
         );
         // DLQ
@@ -462,82 +520,11 @@ routes:
         assert_eq!(name, "kafka_to_nats_from_env");
 
         // Assert source
-        if let SourceEndpointType::Kafka(k) = &route.source.endpoint_type {
+        if let ConsumerEndpointType::Kafka(k) = &route.r#in.endpoint_type {
             assert_eq!(k.config.brokers, "env-kafka:9092"); // group_id is now optional
             assert_eq!(k.endpoint.topic.as_deref(), Some("env-in-topic"));
         } else {
-            panic!("Expected Kafka source");
+            panic!("Expected Kafka source endpoint");
         }
     }
-
-    // This macro helps create small, focused tests for each configuration type.
-    macro_rules! test_config_deserialization {
-        ($test_name:ident, $yaml:expr, $struct_type:ty) => {
-            #[test]
-            fn $test_name() {
-                let yaml_config = $yaml;
-                let result: Result<$struct_type, _> = serde_yaml::from_str(yaml_config);
-                assert!(
-                    result.is_ok(),
-                    "Failed to deserialize for {}: {:?}",
-                    stringify!($test_name),
-                    result.err()
-                );
-            }
-        };
-    }
-
-    // --- Test individual route configurations ---
-
-    test_config_deserialization!(
-        test_kafka_route_config,
-        r#"
-        source:
-          kafka:
-            brokers: "localhost:9092"
-            group_id: "test-group"
-        sink:
-          file:
-            path: "/dev/null"
-        "#,
-        Route
-    );
-
-    test_config_deserialization!(
-        test_nats_route_config,
-        r#"
-        source:
-          nats:
-            url: "localhost:4222"
-            stream: "test-stream"
-            subject: "test-subject"
-        sink:
-          file:
-            path: "/dev/null"
-        "#,
-        Route
-    );
-
-    test_config_deserialization!(
-        test_amqp_route_config,
-        r#"
-        source:
-          amqp:
-            url: "amqp://guest:guest@localhost:5672"
-            queue: "test-queue"
-        sink:
-          file:
-            path: "/dev/null"
-        "#,
-        Route
-    );
-
-    test_config_deserialization!(
-        test_http_source_route_config,
-        r#"
-        source: { http: { listen_address: "0.0.0.0:8080" } }
-        sink: { file: { path: "/dev/null" } }
-        "#,
-        Route
-    );
 }

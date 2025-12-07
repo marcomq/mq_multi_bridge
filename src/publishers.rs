@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::any::Any;
 
 #[async_trait]
-pub trait MessageSink: Send + Sync + 'static {
+pub trait MessagePublisher: Send + Sync + 'static {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>>;
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())

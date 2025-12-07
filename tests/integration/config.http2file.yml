@@ -7,18 +7,18 @@ dedup_ttl_seconds: 60
 
 routes:
   - name: "http_to_log"
-    source:
+    in:
       http:
         listen_address: "0.0.0.0:8080"
         # This sink will be used to generate the HTTP response.
         # The message from the http_in source will be sent to this sink,
         # and the content of the message *after* this sink processes it
         # will be the HTTP response.
-        response_sink: "http_ok_response"
-    sink:
+        response_out: "http_ok_response"
+    out:
       file:
         path: "/tmp/output.log"
   - name: "http_ok_response" # This route name must match the response_sink above
-    source: { http: { listen_address: "0.0.0.0:9999" } } # Dummy source, not used
-    sink:
+    in: { http: { listen_address: "0.0.0.0:9999" } } # Dummy source, not used
+    out:
       staticresponse: { content: "Message processed" }

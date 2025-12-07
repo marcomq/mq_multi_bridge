@@ -6,13 +6,13 @@ dedup_ttl_seconds: 60
 
 routes:
   file_to_mqtt:
-    source:
+    in:
       file: { path: "/tmp/input.log" }
-    sink:
+    out:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
 
   mqtt_to_file:
-    source:
+    in:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
-    sink:
+    out:
       file: { path: "/tmp/output_mqtt.log" }

@@ -83,12 +83,12 @@ metrics:
 # Define bridge routes from a source to a sink
 routes:
   my_kafka_to_nats:
-    source:
+    in:
       kafka:
         brokers: "kafka-us.example.com:9092"
         group_id: "bridge-group-us"
         # topic is optional, defaults to route name
-    sink:
+    out:
       nats:
         url: "nats://nats.example.com:4222"
         stream: "events"
@@ -99,41 +99,41 @@ routes:
       topic: "dlq-kafka-us-to-nats"
 
   amqp_to_kafka_orders:
-    source:
+    in:
       amqp:
         url: "amqp://user:pass@rabbitmq.example.com:5672"
         # queue is optional, defaults to route name
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         # topic is optional, defaults to route name
 
   webhook_to_kafka:
-    source:
+    in:
       http:
         listen_address: "0.0.0.0:8080"
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         # topic defaults to "webhook_to_kafka"
 
   kafka_to_url:
-    source:
+    in:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
         topic: "outgoing.events"
-    sink:
+    out:
       http:
         url: "https://api.example.com/ingest" # Override default URL
 
   file_to_kafka:
-    source:
+    in:
       file:
         path: "/var/data/input.log"
-    sink:
+    out:
       kafka:
         brokers: "kafka-eu.example.com:9092"
         group_id: "bridge-group-eu"
@@ -158,13 +158,13 @@ export BRIDGE__METRICS__ENABLED=true
 export BRIDGE__METRICS__LISTEN_ADDRESS="0.0.0.0:9090"
 
 # Route 'kafka_us_to_nats_events': kafka -> nats
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__BROKERS="kafka-us.example.com:9092"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__GROUP_ID="bridge-group-us"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SOURCE__KAFKA__TOPIC="raw_events" # topic is optional
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__BROKERS="kafka-us.example.com:9092"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__GROUP_ID="bridge-group-us"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__IN__KAFKA__TOPIC="raw_events" # topic is optional
 
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__SUBJECT="processed.events"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__URL="nats://nats.example.com:4222"
-export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__SINK__NATS__STREAM="events"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__SUBJECT="processed.events"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__URL="nats://nats.example.com:4222"
+export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__OUT__NATS__STREAM="events"
 
 # DLQ for Route 'kafka_us_to_nats_events'
 export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__DLQ__KAFKA__BROKERS="kafka-dlq.example.com:9092"
@@ -176,72 +176,107 @@ export BRIDGE__ROUTES__MY_KAFKA_TO_NATS__DLQ__KAFKA__TOPIC="dlq-kafka-us-to-nats
 
 For local development, you can place a `.env` file in the root of the project. The application will automatically load the variables from this file.
 
-## Using as a Library 
-Beyond running as a standalone application, mq-multi-bridge can be used as a library to build custom bridging logic directly in your Rust code. This is useful for embedding, creating custom sources/sinks, or dynamically managing routes. 
+## Using as a Library
 
-### 1. Implement a Custom Source or Sink 
-You can create your own sources and sinks by implementing the MessageSource and MessageSink traits. 
-```rust 
-use mq_multi_bridge::sinks::MessageSink;
-use mq_multi_bridge::model::CanonicalMessage;
-use async_trait::async_trait;
-use std::any::Any;
+Beyond running as a standalone application, `mq-multi-bridge` can be used as a library to interact with various message brokers using a unified API. This is useful for building custom applications that need to produce or consume messages without being tied to a specific broker's SDK.
 
-// A simple in-memory sink for demonstration 
-#[derive(Clone)]
-pub struct MyCustomSink {
-  // ... internal state 
-}
-#[async_trait]
-impl MessageSink for MyCustomSink {
-  async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-    println!("Custom sink received message: {:?}", message);
-    // Return Ok(None) for one-way sinks
-    Ok(None)
-  }
-  fn as_any(&self) -> &dyn Any {
-    self
-  }
+The core of the library are the `MessageConsumer` and `MessagePublisher` traits.
+
+### 1. Publishing Messages
+
+Here's how you can create a publisher and send a message.
+
+```rust,ignore
+use mq_multi_bridge::{
+    config::{KafkaConfig, NatsConfig, AmqpConfig},
+    endpoints::{kafka::KafkaPublisher, nats::NatsPublisher, amqp::AmqpPublisher},
+    model::CanonicalMessage,
+    publishers::MessagePublisher,
+};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // --- Example: Publishing to Kafka ---
+    let kafka_config = KafkaConfig {
+        brokers: "localhost:9092".to_string(),
+        ..Default::default()
+    };
+    let kafka_publisher = KafkaPublisher::new(&kafka_config, "my-kafka-topic").await?;
+    let kafka_message = CanonicalMessage::new(b"Hello, Kafka!".to_vec());
+    kafka_publisher.send(kafka_message).await?;
+    println!("Message sent to Kafka.");
+
+    // --- Example: Publishing to NATS ---
+    let nats_config = NatsConfig {
+        url: "nats://localhost:4222".to_string(),
+        ..Default::default()
+    };
+    let nats_publisher = NatsPublisher::new(&nats_config, "my-nats-subject", Some("my-stream")).await?;
+    let nats_message = CanonicalMessage::new(b"Hello, NATS!".to_vec());
+    nats_publisher.send(nats_message).await?;
+    println!("Message sent to NATS.");
+
+    // --- Example: Publishing to AMQP (RabbitMQ) ---
+    let amqp_config = AmqpConfig {
+        url: "amqp://guest:guest@localhost:5672".to_string(),
+        ..Default::default()
+    };
+    let amqp_publisher = AmqpPublisher::new(&amqp_config, "my-amqp-queue").await?;
+    let amqp_message = CanonicalMessage::new(b"Hello, AMQP!".to_vec());
+    amqp_publisher.send(amqp_message).await?;
+    println!("Message sent to AMQP.");
+
+    Ok(())
 }
 ```
 
-### 2. Build a Bridge Programmatically 
-Use the Bridge struct to configure your application. You can mix and match connections from your config.yml with sources and sinks you create in code.
+### 2. Consuming Messages
+
+Here's how you can create a consumer and receive messages in a loop.
+
 ```rust,ignore
-use mq_multi_bridge::Bridge;
-use mq_multi_bridge::config::{load_config, Config};
-use mq_multi_bridge::sources::MessageSource;
-use mq_multi_bridge::http::HttpSource; // Using a built-in source for the example
-use std::sync::Arc;
+use mq_multi_bridge::{
+    config::{KafkaConfig, NatsConfig, AmqpConfig},
+    endpoints::{kafka::KafkaConsumer, nats::NatsConsumer, amqp::AmqpConsumer},
+    consumers::MessageConsumer,
+};
 
-// Assuming MyCustomSink from the example above
-// use crate::my_sinks::MyCustomSink;
-async fn run_custom_bridge() -> anyhow::Result<()> {
-  // Load base configuration from file/env
-  let config: Config = load_config()?;
-  let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-  
-  // Create a bridge
-  let mut bridge = Bridge::from_config(config, shutdown_rx)?;
-  
-  // Initialize routes from config
-  bridge.initialize_from_config().await?;
-  
-  // Create an instance of a source (can be custom or built-in)
-  let source_config = mq_multi_bridge::config::HttpConfig { 
-      listen_address: Some("0.0.0.0:9000".to_string()), 
-      ..Default::default() 
-  };
-  let my_source: Arc<dyn MessageSource> = Arc::new(HttpSource::new(&source_config).await?);
-  
-  // Create an instance of your custom sink
-  let my_sink = Arc::new(MyCustomSink { /* ... */ });
-  
-  // Add the custom route to the bridge
-  bridge.add_custom_route("http-to-custom", my_source, my_sink, None).await?;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // --- Example: Consuming from Kafka ---
+    let kafka_config = KafkaConfig {
+        brokers: "localhost:9092".to_string(),
+        group_id: Some("my-consumer-group".to_string()),
+        ..Default::default()
+    };
+    let mut kafka_consumer = KafkaConsumer::new(&kafka_config, "my-kafka-topic")?;
 
-  // Run the bridge
-  bridge.run().await 
+    println!("Waiting for Kafka messages...");
+    let (message, commit) = kafka_consumer.receive().await?;
+    println!("Received from Kafka: {:?}", String::from_utf8_lossy(&message.payload));
+    commit(None).await; // Acknowledge the message
+
+    Ok(())
+}
+```
+
+### 3. Implementing a Custom Publisher
+
+You can extend the bridge with your own logic by implementing the `MessagePublisher` or `MessageConsumer` traits.
+
+```rust,ignore
+use mq_multi_bridge::{model::CanonicalMessage, publishers::MessagePublisher};
+use async_trait::async_trait;
+use std::any::Any;
+
+// A simple publisher that just prints messages to the console.
+#[async_trait]
+impl MessagePublisher for MyCustomConsolePublisher {
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        println!("Custom publisher received message: {:?}", message);
+        Ok(None)
+    }
+    fn as_any(&self) -> &dyn Any { self }
 }
 ```
 

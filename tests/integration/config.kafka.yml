@@ -6,13 +6,13 @@ dedup_ttl_seconds: 60
 
 routes:
   file_to_kafka:
-    source:
+    in:
       file: { path: "/tmp/input.log" }
-    sink:
+    out:
       kafka: { brokers: "localhost:9092", topic: "test_topic_kafka" }
 
   kafka_to_file:
-    source:
+    in:
       kafka: { brokers: "localhost:9092", group_id: "integration_test_group_kafka", topic: "test_topic_kafka" }
-    sink:
+    out:
       file: { path: "/tmp/output_kafka.log" }

@@ -4,23 +4,23 @@
 //  git clone https://github.com/marcomq/mq_multi_bridge
 
 use crate::config::HttpConfig;
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::State,
-    http::StatusCode,
+    http::{header::HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
-    Json, Router,
+    Router,
 };
 use axum_server::{tls_rustls::RustlsConfig, Handle};
-use serde_json::Value;
 use std::any::Any;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument};
 
@@ -30,12 +30,11 @@ type HttpSourceMessage = (
 );
 
 /// A source that listens for incoming HTTP requests.
-#[derive(Clone)]
-pub struct HttpSource {
-    request_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<HttpSourceMessage>>>,
+pub struct HttpConsumer {
+    request_rx: mpsc::Receiver<HttpSourceMessage>,
 }
 
-impl HttpSource {
+impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
 
@@ -88,17 +87,15 @@ impl HttpSource {
         });
 
         ready_rx.await?;
-        Ok(Self {
-            request_rx: Arc::new(tokio::sync::Mutex::new(request_rx)),
-        })
+        Ok(Self { request_rx })
     }
 }
 
 #[async_trait]
-impl MessageSource for HttpSource {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut rx = self.request_rx.lock().await;
-        let (message, response_tx) = rx
+impl MessageConsumer for HttpConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let (message, response_tx) = self
+            .request_rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("HTTP source channel closed"))?;
@@ -123,10 +120,19 @@ impl MessageSource for HttpSource {
 #[instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
 async fn handle_request(
     State(tx): State<mpsc::Sender<HttpSourceMessage>>,
-    Json(payload): Json<Value>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let (response_tx, response_rx) = oneshot::channel();
-    let message = CanonicalMessage::deserialized_new(payload);
+    let mut message = CanonicalMessage::new(body.to_vec());
+
+    let mut metadata = HashMap::new();
+    for (key, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            metadata.insert(key.as_str().to_string(), value_str.to_string());
+        }
+    }
+    message.metadata = metadata;
 
     if tx.send((message, response_tx)).await.is_err() {
         return (
@@ -137,9 +143,25 @@ async fn handle_request(
     }
 
     match response_rx.await {
-        Ok(Ok(Some(response_message))) => {
-            (StatusCode::OK, Json(response_message.payload)).into_response()
-        }
+        Ok(Ok(Some(response_message))) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                response_message
+                    .metadata
+                    .get("content-type")
+                    .cloned()
+                    .unwrap_or_else(|| "application/json".to_string()),
+            )],
+            response_message.payload,
+        )
+            .into_response(),
+        // Ok(Ok(Some(response_message))) => (
+        //     StatusCode::OK,
+        //     [(axum::http::header::CONTENT_TYPE, "application/json")],
+        //     response_message.payload,
+        // )
+        //     .into_response(),
         Ok(Ok(None)) => (StatusCode::ACCEPTED, "Message processed").into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -156,13 +178,13 @@ async fn handle_request(
 
 /// A sink that sends messages to an HTTP endpoint.
 #[derive(Clone)]
-pub struct HttpSink {
+pub struct HttpPublisher {
     client: reqwest::Client,
     url: String,
     response_sink: Option<String>,
 }
 
-impl HttpSink {
+impl HttpPublisher {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let mut client_builder = reqwest::Client::builder();
 
@@ -192,33 +214,42 @@ impl HttpSink {
 }
 
 #[async_trait]
-impl MessageSink for HttpSink {
+impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let response = self
-            .client
-            .post(&self.url)
-            .json(&message)
+        let mut request_builder = self.client.post(&self.url);
+        for (key, value) in &message.metadata {
+            request_builder = request_builder.header(key, value);
+        }
+
+        let response = request_builder
+            .body(message.payload)
             .send()
             .await
             .with_context(|| format!("Failed to send HTTP request to {}", self.url))?;
 
         let response_status = response.status();
-        let response_payload = response
-            .json::<Value>()
-            .await
-            .with_context(|| "Failed to parse JSON response from HTTP sink")?;
+        let mut response_metadata = HashMap::new();
+        for (key, value) in response.headers() {
+            if let Ok(value_str) = value.to_str() {
+                response_metadata.insert(key.as_str().to_string(), value_str.to_string());
+            }
+        }
+
+        let response_bytes = response.bytes().await?.to_vec();
 
         if !response_status.is_success() {
             return Err(anyhow!(
                 "HTTP sink request failed with status {}: {:?}",
                 response_status,
-                response_payload
+                String::from_utf8_lossy(&response_bytes)
             ));
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if self.response_sink.is_some() {
-            Ok(Some(CanonicalMessage::new(response_payload)))
+            let mut response_message = CanonicalMessage::new(response_bytes);
+            response_message.metadata = response_metadata;
+            Ok(Some(response_message))
         } else {
             Ok(None)
         }

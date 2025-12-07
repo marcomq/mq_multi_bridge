@@ -2,27 +2,28 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
-
 use crate::config::FileConfig;
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::publishers::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, instrument};
 
 /// A sink that writes messages to a file, one per line.
-pub struct FileSink {
+#[derive(Clone)]
+pub struct FilePublisher {
     writer: Arc<Mutex<BufWriter<File>>>,
 }
 
-impl FileSink {
+impl FilePublisher {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
         let path = Path::new(&config.path);
         if let Some(parent) = path.parent() {
@@ -47,24 +48,24 @@ impl FileSink {
     }
 }
 
-impl Clone for FileSink {
-    fn clone(&self) -> Self {
-        Self {
-            writer: self.writer.clone(),
-        }
-    }
-}
-
 #[async_trait]
-impl MessageSink for FileSink {
+impl MessagePublisher for FilePublisher {
+    #[instrument(skip_all, fields(message_id = %message.message_id))]
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut payload = serde_json::to_vec(&message)?;
+        let mut payload = message.payload;
         payload.push(b'\n'); // Add a newline to separate messages
 
         let mut writer = self.writer.lock().await;
         writer.write_all(&payload).await?;
-        writer.flush().await?; // Ensure it's written to disk
+        // writer.flush().await?;
+
         Ok(None)
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        let mut writer = self.writer.lock().await;
+        writer.flush().await?;
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -73,12 +74,12 @@ impl MessageSink for FileSink {
 }
 
 /// A source that reads messages from a file, one line at a time.
-pub struct FileSource {
-    reader: Arc<Mutex<BufReader<File>>>,
+pub struct FileConsumer {
     path: String,
+    reader: BufReader<File>,
 }
 
-impl FileSource {
+impl FileConsumer {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -88,34 +89,26 @@ impl FileSource {
 
         info!(path = %config.path, "File source opened for reading");
         Ok(Self {
-            reader: Arc::new(Mutex::new(BufReader::new(file))),
+            reader: BufReader::new(file),
             path: config.path.clone(),
         })
     }
 }
 
-impl Clone for FileSource {
-    fn clone(&self) -> Self {
-        Self {
-            reader: self.reader.clone(),
-            path: self.path.clone(),
-        }
-    }
-}
-
 #[async_trait]
-impl MessageSource for FileSource {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut reader = self.reader.lock().await;
+impl MessageConsumer for FileConsumer {
+    #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         let mut line = String::new();
 
-        let bytes_read = reader.read_line(&mut line).await?;
+        let bytes_read = self.reader.read_line(&mut line).await?;
         if bytes_read == 0 {
+            info!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 
-        let payload: serde_json::Value = serde_json::from_str(&line)?;
-        let message = CanonicalMessage::deserialized_new(payload);
+        // Trim the newline character that read_line includes
+        let message = CanonicalMessage::new(line.trim_end().as_bytes().to_vec());
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
@@ -130,8 +123,13 @@ impl MessageSource for FileSource {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::CanonicalMessage;
+    use crate::{
+        config::FileConfig,
+        consumers::MessageConsumer,
+        endpoints::file::{FileConsumer, FilePublisher},
+        model::CanonicalMessage,
+        publishers::MessagePublisher,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -146,20 +144,23 @@ mod tests {
         let sink_config = FileConfig {
             path: file_path_str.clone(),
         };
-        let sink = FileSink::new(&sink_config).await.unwrap();
+        let sink = FilePublisher::new(&sink_config).await.unwrap();
 
-        // 3. Send some messages
-        let msg1 = CanonicalMessage::new(json!({"hello": "world"}));
-        let msg2 = CanonicalMessage::new(json!({"foo": "bar"}));
+        let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
+        let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
 
         sink.send(msg1.clone()).await.unwrap();
         sink.send(msg2.clone()).await.unwrap();
+        // Explicitly flush to ensure data is written before we try to read it.
+        sink.flush().await.unwrap();
+        // Drop the sink to release the file lock on some OSes before the source tries to open it.
+        drop(sink);
 
-        // 4. Create a FileSource to read from the same file
+        // 4. Create a FileConsumer to read from the same file
         let source_config = FileConfig {
             path: file_path_str.clone(),
         };
-        let source = FileSource::new(&source_config).await.unwrap();
+        let mut source = FileConsumer::new(&source_config).await.unwrap();
 
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
@@ -190,7 +191,7 @@ mod tests {
         let sink_config = FileConfig {
             path: file_path.to_str().unwrap().to_string(),
         };
-        let sink_result = FileSink::new(&sink_config).await;
+        let sink_result = FilePublisher::new(&sink_config).await;
 
         assert!(sink_result.is_ok());
         assert!(nested_dir_path.exists());

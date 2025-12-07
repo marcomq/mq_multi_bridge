@@ -1,4 +1,4 @@
-This is supposed to run via `cargo test -- --ignored --test-threads=1`
+This is supposed to run via `cargo test --test integration_test --features integration-test --release -- --ignored --nocapture --test-threads=1 --show-output`
 
 Alternatively, you can use this to start a test bridge manually from project root:
 ```bash

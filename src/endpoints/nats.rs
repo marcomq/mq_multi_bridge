@@ -1,26 +1,26 @@
 use crate::config::NatsConfig;
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
-use async_nats::{jetstream, jetstream::stream, ConnectOptions};
+use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
-use futures::StreamExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
 use std::sync::Arc;
-use tokio::{sync::Mutex, time::Duration};
+use tokio::time::Duration;
 use tracing::info;
 
-pub struct NatsSink {
+pub struct NatsPublisher {
     jetstream: jetstream::Context,
     subject: String,
+    await_ack: bool,
 }
 
-impl NatsSink {
+impl NatsPublisher {
     pub async fn new(
         config: &NatsConfig,
         subject: &str,
@@ -38,10 +38,9 @@ impl NatsSink {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     // The stream must be configured to capture the specific subject,
-                    // and optionally any sub-subjects if it's a wildcard.
-                    // A subject filter of `foo.>` will match `foo.bar` but not `foo`.
-                    // So we need both `subject` and `subject.*` if we want to match both.
-                    subjects: vec![subject.to_string(), format!("{}.>", subject)],
+                    // or a wildcard. A subject filter of `stream_name.>` will capture
+                    // all subjects that start with the stream name, which is a common pattern.
+                    subjects: vec![format!("{}.>", stream_name)], // e.g., "perf_stream_nats.>"
                     ..Default::default()
                 })
                 .await?;
@@ -52,6 +51,7 @@ impl NatsSink {
         Ok(Self {
             jetstream,
             subject: subject.to_string(),
+            await_ack: config.await_ack,
         })
     }
 
@@ -59,19 +59,29 @@ impl NatsSink {
         Self {
             jetstream: self.jetstream.clone(),
             subject: subject.to_string(),
+            await_ack: self.await_ack,
         }
     }
 }
 
 #[async_trait]
-impl MessageSink for NatsSink {
+impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_vec(&message)?;
-        // Use jetstream.publish and await the ack future to guarantee delivery.
-        self.jetstream
-            .publish(self.subject.clone(), payload.into())
-            .await?
-            .await?; // This second await waits for the server acknowledgement.
+        let mut headers = HeaderMap::new();
+        if !message.metadata.is_empty() {
+            for (key, value) in &message.metadata {
+                headers.insert(key.as_str(), value.as_str());
+            }
+        }
+
+        let ack_future = self
+            .jetstream
+            .publish_with_headers(self.subject.clone(), headers, message.payload.into())
+            .await?;
+
+        if self.await_ack {
+            ack_future.await?; // Wait for the server acknowledgment
+        }
         Ok(None)
     }
 
@@ -80,13 +90,13 @@ impl MessageSink for NatsSink {
     }
 }
 
-pub struct NatsSource {
-    jetstream: jetstream::Context,
-    subscription: Arc<Mutex<jetstream::consumer::pull::Stream>>,
+pub struct NatsConsumer {
+    _jetstream: jetstream::Context,
+    subscription: jetstream::consumer::pull::Stream,
 }
 use std::any::Any;
 
-impl NatsSource {
+impl NatsConsumer {
     pub async fn new(
         config: &NatsConfig,
         stream_name: &str,
@@ -96,28 +106,21 @@ impl NatsSource {
         let client = options.connect(&config.url).await?;
         let jetstream = jetstream::new(client);
 
-        // Create a new consumer specifically for the given subject.
-        // Retry getting the stream to handle race conditions where the sink is still creating it.
-        let mut stream = None;
-        for attempt in 0..20 {
-            match jetstream.get_stream(stream_name).await {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(_) => {
-                    if attempt < 19 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            }
-        }
-        let stream = stream.ok_or_else(|| {
-            anyhow!(
-                "Failed to get NATS stream '{}' after multiple retries",
-                stream_name
-            )
-        })?;
+        // Ensure the stream exists. This is idempotent and safe to call from both
+        // publisher and consumer. It prevents race conditions where the consumer
+        // might start before the publisher has created the stream.
+        jetstream
+            .get_or_create_stream(stream::Config {
+                name: stream_name.to_string(),
+                subjects: vec![format!("{}.>", stream_name)],
+                ..Default::default()
+            })
+            .await?;
+
+        // Now that we've ensured the stream exists, we can get a handle to it.
+        // This is more direct and less prone to race conditions than the previous retry loop.
+        let stream = jetstream.get_stream(stream_name).await?;
+
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 // Create a unique, durable consumer name based on stream and subject
@@ -143,23 +146,31 @@ impl NatsSource {
         info!(stream = %stream_name, subject = %subject, "NATS source subscribed to subject");
 
         Ok(Self {
-            jetstream,
-            subscription: Arc::new(Mutex::new(subscription)),
+            _jetstream: jetstream,
+            subscription,
         })
     }
 }
 
 #[async_trait]
-impl MessageSource for NatsSource {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut sub = self.subscription.lock().await;
-        let message = sub
-            .next()
+impl MessageConsumer for NatsConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let message = futures::StreamExt::next(&mut self.subscription)
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
 
-        let canonical_message: CanonicalMessage =
-            serde_json::from_slice(&message.payload).map_err(anyhow::Error::from)?;
+        let mut canonical_message = CanonicalMessage::new(message.payload.to_vec());
+
+        if let Some(headers) = &message.headers {
+            let mut metadata = std::collections::HashMap::new();
+            for (key, value) in headers.iter() {
+                // A header key can have multiple values. We'll just take the first one.
+                if let Some(first_value) = value.iter().next() {
+                    metadata.insert(key.to_string(), first_value.to_string());
+                }
+            }
+            canonical_message.metadata = metadata;
+        }
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -175,15 +186,6 @@ impl MessageSource for NatsSource {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl Clone for NatsSource {
-    fn clone(&self) -> Self {
-        Self {
-            jetstream: self.jetstream.clone(),
-            subscription: self.subscription.clone(),
-        }
     }
 }
 

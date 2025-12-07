@@ -1,39 +1,31 @@
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
-    #[serde(default = "Uuid::new_v4")]
-    pub message_id: Uuid,
-    pub schema_version: String,
-    pub ts: u64,
-    pub payload: serde_json::Value,
+    pub message_id: u64,
+    pub payload: Vec<u8>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 impl CanonicalMessage {
-    pub fn new(payload: serde_json::Value) -> Self {
+    pub fn new(payload: Vec<u8>) -> Self {
+        let message_id = seahash::hash(&payload);
         Self {
-            message_id: Uuid::new_v4(),
-            schema_version: "1.0".to_string(),
-            ts: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            message_id,
             payload,
+            metadata: HashMap::new(),
         }
     }
 
-    /// Creates a new CanonicalMessage from a deserialized payload,
-    /// generating a new message_id if one is not present.
-    pub fn deserialized_new(payload: serde_json::Value) -> Self {
-        let mut msg: CanonicalMessage =
-            serde_json::from_value(payload.clone()).unwrap_or_else(|_| {
-                // If the payload is not a valid CanonicalMessage, treat the whole thing as the payload
-                CanonicalMessage::new(payload)
-            });
-        // Ensure timestamp is current if it was missing
-        msg.ts = msg.ts.max(1); // Ensure it's not 0 from default
-        msg
+    pub fn from_json(payload: serde_json::Value) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(&payload)?;
+        Ok(Self::new(bytes))
+    }
+
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
     }
 }

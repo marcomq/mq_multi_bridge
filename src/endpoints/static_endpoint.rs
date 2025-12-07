@@ -1,0 +1,74 @@
+//  mq_multi_bridge
+//  © Copyright 2025, by Marco Mengelkoch
+//  Licensed under MIT License, see License file for more details
+//  git clone https://github.com/marcomq/mq_multi_bridge
+
+use crate::config::StaticEndpoint;
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::model::CanonicalMessage;
+use crate::publishers::MessagePublisher;
+use async_trait::async_trait;
+use serde_json::Value;
+use std::any::Any;
+use tracing::trace;
+
+/// A sink that responds with a static, pre-configured message.
+#[derive(Clone)]
+pub struct StaticEndpointPublisher {
+    content: String,
+}
+
+impl StaticEndpointPublisher {
+    pub fn new(config: &StaticEndpoint) -> anyhow::Result<Self> {
+        Ok(Self {
+            content: config.content.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl MessagePublisher for StaticEndpointPublisher {
+    async fn send(&self, _message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        trace!(response = %self.content, "Sending static response");
+        let payload = serde_json::to_vec(&Value::String(self.content.clone()))?;
+        Ok(Some(CanonicalMessage::new(payload)))
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        Ok(()) // Nothing to flush for a static response
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A source that always produces the same static message.
+#[derive(Clone)]
+pub struct StaticRequestConsumer {
+    content: String,
+}
+
+impl StaticRequestConsumer {
+    pub fn new(config: &StaticEndpoint) -> anyhow::Result<Self> {
+        Ok(Self {
+            content: config.content.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for StaticRequestConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let payload = self.content.as_bytes().to_vec();
+        let message = CanonicalMessage::new(payload);
+        let commit = Box::new(|_response: Option<CanonicalMessage>| {
+            Box::pin(async {}) as BoxFuture<'static, ()>
+        });
+        Ok((message, commit))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

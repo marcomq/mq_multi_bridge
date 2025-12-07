@@ -1,31 +1,30 @@
 use crate::config::MqttConfig;
+use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::sinks::MessageSink;
-use crate::sources::{BoxFuture, BoxedMessageStream, MessageSource};
+use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
-use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use std::{any::Any, future::Future};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
-pub struct MqttSink {
+use tracing::{error, info, trace, warn};
+pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
     _eventloop_handle: Arc<JoinHandle<()>>,
 }
 
-impl MqttSink {
-    pub async fn new(
-        config: &MqttConfig,
-        topic: &str,
-        bridge_id: &str,
-    ) -> anyhow::Result<Self> {
-        let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
-        let eventloop_handle =
-            tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+impl MqttPublisher {
+    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
+        let (client, eventloop) = create_client_and_eventloop(config, bridge_id).await?;
+        let (eventloop_handle, ready_rx) = run_eventloop(eventloop, "Publisher", None);
+
+        // Wait for the eventloop to confirm connection.
+        tokio::time::timeout(Duration::from_secs(10), ready_rx).await??;
+
         Ok(Self {
             client,
             topic: topic.to_string(),
@@ -39,14 +38,21 @@ impl MqttSink {
             _eventloop_handle: self._eventloop_handle.clone(),
         }
     }
+
+    pub async fn disconnect(&self) -> Result<(), rumqttc::ClientError> {
+        self.client.disconnect().await
+    }
 }
 
 #[async_trait]
-impl MessageSink for MqttSink {
+impl MessagePublisher for MqttPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let payload = serde_json::to_string(&message)?;
+        tracing::trace!(
+            payload = %String::from_utf8_lossy(&message.payload),
+            "Publishing MQTT message"
+        );
         self.client
-            .publish(&self.topic, QoS::AtLeastOnce, false, payload)
+            .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
             .await?;
         Ok(None)
     }
@@ -56,106 +62,60 @@ impl MessageSink for MqttSink {
     }
 }
 
-impl Drop for MqttSink {
-    fn drop(&mut self) {
-        // To ensure all buffered messages are sent before the client is dropped,
-        // we spawn a task to perform a graceful disconnect. This is crucial for sinks
-        // that might be dropped immediately after sending, like in a file-to-broker scenario.
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let _ = client.disconnect().await;
-        });
-    }
-}
-
-pub struct MqttSource {
-    client: AsyncClient,
+pub struct MqttConsumer {
+    _client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
-    message_rx: Arc<Mutex<mpsc::Receiver<rumqttc::Publish>>>,
-    _eventloop_handle: Arc<JoinHandle<()>>,
+    eventloop_handle: Arc<JoinHandle<()>>,
+    message_rx: mpsc::Receiver<rumqttc::Publish>,
 }
 
-impl MqttSource {
+impl MqttConsumer {
     pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
-        let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
-        let (message_tx, message_rx) = mpsc::channel(10);
+        let (client, eventloop) = create_client_and_eventloop(config, bridge_id).await?;
+        // Use the configured queue_capacity for the internal MPSC channel.
+        let queue_capacity = config.queue_capacity.unwrap_or(100);
+        let (message_tx, message_rx) = mpsc::channel(queue_capacity);
 
-        // The subscription must happen *after* the client is connected.
-        // The best place for this is inside the eventloop task itself,
-        // which can wait for the connection to be established.
-        let topic_clone = topic.to_string();
+        let (eventloop_handle, ready_rx) = run_eventloop(
+            eventloop,
+            "Consumer",
+            Some((client.clone(), topic.to_string(), message_tx)),
+        );
 
-        // Spawn a dedicated task to poll the eventloop
-        let eventloop_handle = tokio::spawn(async move {
-            loop {
-                match eventloop.poll().await {
-                    Ok(Event::Incoming(Incoming::Publish(p))) => {
-                        if message_tx.send(p).await.is_err() {
-                            // Receiver was dropped, so we can exit
-                            break;
-                        }
-                    }
-                    Ok(Event::Incoming(Incoming::Disconnect)) => {
-                        error!("MQTT Source disconnected.");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("MQTT Source eventloop error: {}", e);
-                        break;
-                    }
-                    Ok(Event::Outgoing(rumqttc::Outgoing::Subscribe(_))) => {
-                        info!(topic = %topic_clone, "MQTT source subscribed");
-                    }
-                    _ => {} // Ignore other events
-                }
-            }
-        });
-
-        // The rumqttc client will queue this and send it once the connection is established by the eventloop.
-        client.subscribe(topic, QoS::AtLeastOnce).await?;
+        // Wait for the eventloop to confirm connection and subscription.
+        tokio::time::timeout(Duration::from_secs(10), ready_rx).await??;
 
         Ok(Self {
-            client,
-            message_rx: Arc::new(Mutex::new(message_rx)),
-            _eventloop_handle: Arc::new(eventloop_handle),
+            _client: client,
+            message_rx,
+            eventloop_handle: Arc::new(eventloop_handle),
         })
-    }
-
-    pub async fn with_topic(&self, topic: &str) -> anyhow::Result<Self> {
-        self.client.subscribe(topic, QoS::AtLeastOnce).await?;
-        info!(topic = %topic, "MQTT source subscribed to new topic");
-        Ok(self.clone())
-    }
-
-    // Add an accessor for the client
-    pub fn client(&self) -> AsyncClient {
-        self.client.clone()
     }
 }
 
-impl Drop for MqttSource {
+impl Drop for MqttConsumer {
     fn drop(&mut self) {
         // When the source is dropped, abort its background eventloop task.
-        self._eventloop_handle.abort();
+        self.eventloop_handle.abort();
     }
 }
 
 #[async_trait]
-impl MessageSource for MqttSource {
-    async fn receive(&self) -> anyhow::Result<(CanonicalMessage, BoxedMessageStream)> {
-        let mut message_rx = self.message_rx.lock().await;
-        let p = message_rx
+impl MessageConsumer for MqttConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let p = self
+            .message_rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("MQTT source channel closed"))?;
 
-        let canonical_message: CanonicalMessage = serde_json::from_slice(&p.payload)?;
+        let canonical_message = CanonicalMessage::new(p.payload.to_vec());
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
                 // With rumqttc, acks are handled internally for QoS 1.
                 // This closure is called after successful processing.
-                info!(topic = %p.topic, "MQTT message processed");
+                trace!(topic = %p.topic, "MQTT message processed");
             }) as BoxFuture<'static, ()>
         });
 
@@ -165,6 +125,86 @@ impl MessageSource for MqttSource {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Runs the MQTT event loop, handling connections, subscriptions, and message forwarding.
+fn run_eventloop(
+    mut eventloop: rumqttc::EventLoop,
+    client_type: &'static str,
+    consumer_info: Option<(AsyncClient, String, mpsc::Sender<rumqttc::Publish>)>,
+) -> (
+    JoinHandle<()>,
+    impl Future<Output = Result<(), anyhow::Error>>,
+) {
+    let (ready_tx, ready_rx) = oneshot::channel();
+
+    let handle = tokio::spawn(async move {
+        let mut ready_tx = Some(ready_tx);
+
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
+                    if ack.code == rumqttc::ConnectReturnCode::Success {
+                        info!("MQTT {} connected.", client_type);
+                        // If this is a consumer, subscribe to the topic.
+                        if let Some((client, topic, _)) = &consumer_info {
+                            if let Err(e) = client.subscribe(topic, QoS::AtLeastOnce).await {
+                                error!("MQTT {} failed to subscribe: {}. Halting.", client_type, e);
+                                if let Some(tx) = ready_tx.take() {
+                                    let _ = tx.send(Err(e.into()));
+                                }
+                                break;
+                            }
+                            info!("MQTT {} subscribed to topic '{}'", client_type, topic);
+                        }
+                        // Signal that the client is ready.
+                        if let Some(tx) = ready_tx.take() {
+                            let _ = tx.send(Ok(()));
+                        }
+                    } else {
+                        error!(
+                            "MQTT {} connection refused: {:?}. Halting.",
+                            client_type, ack.code
+                        );
+                        if let Some(tx) = ready_tx.take() {
+                            let _ = tx.send(Err(anyhow!("Connection refused: {:?}", ack.code)));
+                        }
+                        break;
+                    }
+                }
+                Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                    if let Some((_, _, message_tx)) = &consumer_info {
+                        if message_tx.send(publish).await.is_err() {
+                            info!("MQTT {} message channel closed. Halting.", client_type);
+                            break;
+                        }
+                    }
+                }
+                Ok(event) => {
+                    trace!("MQTT {} received event: {:?}", client_type, event);
+                }
+                Err(e) => {
+                    error!(
+                        "MQTT {} eventloop error: {}. Reconnecting...",
+                        client_type, e
+                    );
+                    if let Some(tx) = ready_tx.take() {
+                        // If we haven't signaled readiness yet, signal an error.
+                        let _ = tx.send(Err(e.into()));
+                    }
+                    // rumqttc handles reconnection, but a small delay prevents tight error loops.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+        info!("MQTT {} eventloop finished.", client_type);
+    });
+
+    (handle, async {
+        ready_rx
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("Sender dropped")))
+    })
 }
 
 async fn create_client_and_eventloop(
@@ -189,7 +229,7 @@ async fn create_client_and_eventloop(
             let mut ca_buf = std::io::BufReader::new(std::fs::File::open(ca_file)?);
             let certs = rustls_pemfile::certs(&mut ca_buf).collect::<Result<Vec<_>, _>>()?;
             for cert in certs {
-                root_cert_store.add(cert.into())?;
+                root_cert_store.add(cert)?;
             }
         }
 
@@ -214,7 +254,8 @@ async fn create_client_and_eventloop(
         mqttoptions.set_transport(Transport::tls_with_config(client_config.into()));
     }
 
-    let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
+    let queue_capacity = config.queue_capacity.unwrap_or(100);
+    let (client, eventloop) = AsyncClient::new(mqttoptions, queue_capacity);
     // The connection is established by the eventloop automatically.
     // We don't need a manual health check. If connection fails, the eventloop will error out.
     info!(url = %config.url, "MQTT client created. Eventloop will connect.");
@@ -289,6 +330,13 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
         .host_str()
         .ok_or_else(|| anyhow!("No host in URL"))?
         .to_string();
+    // Prefer IPv4 localhost to avoid macOS resolving `localhost` to ::1
+    // which can bypass Docker Desktop port forwarding in some setups.
+    let host = if host == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
     let port = url
         .port()
         .unwrap_or(if url.scheme() == "mqtts" || url.scheme() == "ssl" {
@@ -297,14 +345,4 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
             1883
         });
     Ok((host, port))
-}
-
-impl Clone for MqttSource {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            message_rx: self.message_rx.clone(),
-            _eventloop_handle: self._eventloop_handle.clone(),
-        }
-    }
 }

@@ -7,54 +7,54 @@ dedup_ttl_seconds: 60
 routes:
   # --- Kafka Test Routes ---
   file_to_kafka:
-    source:
+    in:
       file:
         path: "/tmp/input.log" # This will be overridden by the test
-    sink:
+    out:
       kafka: { brokers: "localhost:9092", topic: "test_topic_kafka" }
 
   kafka_to_file:
-    source:
+    in:
       kafka: { brokers: "localhost:9092", group_id: "integration_test_group_kafka", topic: "test_topic_kafka" }
-    sink:
+    out:
       file: { path: "/tmp/output_kafka.log" } # This will be overridden
 
   # --- NATS Test Routes ---
   file_to_nats:
-    source:
+    in:
       file:
         path: "/tmp/input.log" # This will be overridden
-    sink:
+    out:
       nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
 
   nats_to_file:
-    source:
+    in:
       nats: { url: "nats://localhost:4222", subject: "test_subject_nats", stream: "test-stream" }
-    sink:
+    out:
       file: { path: "/tmp/output_nats.log" } # This will be overridden
 
   # --- AMQP (RabbitMQ) Test Routes ---
   file_to_amqp:
-    source:
+    in:
       file: { path: "/tmp/input.log" } # This will be overridden
-    sink:
+    out:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
 
   amqp_to_file:
-    source:
+    in:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
-    sink:
+    out:
       file: { path: "/tmp/output_amqp.log" } # This will be overridden
 
   # --- MQTT Test Routes ---
   file_to_mqtt:
-    source:
+    in:
       file: { path: "/tmp/input.log" } # This will be overridden
-    sink:
+    out:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
 
   mqtt_to_file:
-    source:
+    in:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
-    sink:
+    out:
       file: { path: "/tmp/output_mqtt.log" } # This will be overridden
