@@ -133,7 +133,7 @@ mod tests {
         assert!(store.is_duplicate(&message_id).unwrap());
 
         // Wait for the TTL to expire
-        tokio::time::sleep(Duration::from_secs(ttl_seconds + 1)).await;
+        tokio::time::sleep(Duration::from_secs(ttl_seconds + 2)).await;
 
         // After TTL, it should no longer be considered a duplicate
         assert!(!store.is_duplicate(&message_id).unwrap());

@@ -111,6 +111,12 @@ impl DockerCompose {
     }
 }
 
+impl Drop for DockerCompose {
+    fn drop(&mut self) {
+        self.down();
+    }
+}
+
 pub fn read_output_file(path: &std::path::Path) -> HashSet<String> {
     if !path.exists() {
         println!(
@@ -396,6 +402,19 @@ pub fn setup_logging() {
             .with(stdout_layer)
             .init();
     });
+}
+
+/// A test harness that manages the lifecycle of Docker containers for a single test.
+/// It ensures that `docker-compose up` is run before the test and `docker-compose down`
+/// is run after, even if the test panics.
+pub async fn run_test_with_docker<F, Fut>(compose_file: &str, test_fn: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _docker = DockerCompose::new(compose_file);
+    _docker.up();
+    test_fn().await;
 }
 
 pub const PERF_TEST_MESSAGE_COUNT: usize = 20_000;
