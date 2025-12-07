@@ -54,8 +54,21 @@ async fn test_mqtt_performance_direct() {
     let consumer_id = format!("perftest-sub-{}", unique_id);
     let config = mq_multi_bridge::config::MqttConfig {
         url: "mqtt://localhost:1883".to_string(),
+        // Increase the client's incoming message buffer to hold all messages from the test run.
+        queue_capacity: Some(PERF_TEST_MESSAGE_COUNT_DIRECT),
         ..Default::default()
     };
+
+    // Create the consumer and subscribe before publishing messages.
+    let consumer = Arc::new(Mutex::new(
+        MqttConsumer::new(&config, topic, &consumer_id)
+            .await
+            .unwrap(),
+    ));
+
+    // Give the consumer a moment to connect and subscribe.
+    // This helps ensure the subscription is active before messages are published.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = Arc::new(
         MqttPublisher::new(&config, topic, &publisher_id)
@@ -79,10 +92,5 @@ async fn test_mqtt_performance_direct() {
     // This helps prevent the broker from overwhelming the new consumer and dropping the connection.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let consumer = Arc::new(Mutex::new(
-        MqttConsumer::new(&config, topic, &consumer_id)
-            .await
-            .unwrap(),
-    ));
     measure_read_performance("MQTT", consumer, PERF_TEST_MESSAGE_COUNT_DIRECT).await;
 }

@@ -73,6 +73,9 @@ pub struct MqttConfig {
     pub tls: ClientTlsConfig,
     pub username: Option<String>,
     pub password: Option<String>,
+    // The capacity of the internal message queue for the MQTT client.
+    pub queue_capacity: Option<usize>,
+    
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
