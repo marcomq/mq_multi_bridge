@@ -4,6 +4,8 @@ services:
     container_name: mosquitto-itest-mq-multi-bridge
     ports:
       - "1883:1883"
+    volumes:
+       - "./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro"
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 1883"]
       interval: 5s

@@ -8,6 +8,7 @@ use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, Q
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -20,7 +21,75 @@ pub struct MqttPublisher {
 impl MqttPublisher {
     pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
         let (client, mut eventloop) = create_client_and_eventloop(config, bridge_id).await?;
-        let eventloop_handle = tokio::spawn(async move { while eventloop.poll().await.is_ok() {} });
+        let topic_clone = topic.to_string();
+        // Wait briefly for an initial ConnAck so the caller gets a deterministic connection result.
+        let mut connected = false;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
+                    if ack.code == rumqttc::ConnectReturnCode::Success {
+                        info!("MQTT Publisher connected successfully.");
+                        connected = true;
+                        break;
+                    } else {
+                        error!(
+                            "MQTT Publisher connection refused: {:?}.",
+                            ack.code
+                        );
+                        return Err(anyhow!("MQTT Publisher connection refused"));
+                    }
+                }
+                Ok(event) => {
+                    tracing::trace!("MQTT Publisher received event while waiting for connack: {:?}", event);
+                }
+                Err(rumqttc::ConnectionError::Tls(e)) => {
+                    error!("MQTT Publisher TLS error: {}.", e);
+                    return Err(anyhow!("MQTT Publisher TLS error"));
+                }
+                Err(e) => {
+                    error!("MQTT Publisher eventloop error while waiting for connack: {}. retrying...", e);  
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        if !connected {
+            return Err(anyhow!("Timeout waiting for MQTT Publisher ConnAck"));
+        }
+
+        let eventloop_handle = tokio::spawn(async move {
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
+                        if ack.code == rumqttc::ConnectReturnCode::Success {
+                            info!("MQTT Publisher eventloop observed successful ConnAck.");
+                        } else {
+                            error!(
+                                "MQTT Publisher connection refused: {:?}. Halting event loop.",
+                                ack.code
+                            );
+                            break;
+                        }
+                    }
+                    Ok(event) => {
+                        tracing::trace!("MQTT Publisher received event: {:?}", event);
+                    }
+                    Err(rumqttc::ConnectionError::Tls(e)) => {
+                        error!("MQTT Publisher TLS error: {}. Halting event loop.", e);
+                        break;
+                    }
+                    Err(e) => {
+                        // Log the error and continue the loop. rumqttc will handle reconnection internally.
+                        // Adding a sleep here can interfere with its reconnection logic.
+                        error!("MQTT Publisher eventloop error: {}. rumqttc will attempt to reconnect.", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+            info!(topic = %topic_clone, "MQTT publisher event finished.");
+        });
+
         Ok(Self {
             client,
             topic: topic.to_string(),
@@ -43,7 +112,12 @@ impl MqttPublisher {
 #[async_trait]
 impl MessagePublisher for MqttPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        self.client
+        tracing::trace!(
+            payload = %String::from_utf8_lossy(&message.payload),
+            "Publishing MQTT message"
+        );
+        self
+            .client
             .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
             .await?;
         Ok(None)
@@ -57,7 +131,7 @@ impl MessagePublisher for MqttPublisher {
 pub struct MqttConsumer {
     _client: AsyncClient,
     // The receiver for incoming messages from the dedicated eventloop task
-    _eventloop_handle: Arc<JoinHandle<()>>,
+    eventloop_handle: Arc<JoinHandle<()>>,
     message_rx: mpsc::Receiver<rumqttc::Publish>,
 }
 
@@ -70,40 +144,81 @@ impl MqttConsumer {
         // The best place for this is inside the eventloop task itself,
         // which can wait for the connection to be established.
         let topic_clone = topic.to_string();
+        let client_clone = client.clone();
 
-        // Spawn a dedicated task to poll the eventloop
+        // Wait briefly for an initial ConnAck so the caller gets a deterministic connection result.
+        let mut connected = false;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
+                    if ack.code == rumqttc::ConnectReturnCode::Success {
+                        info!("MQTT Consumer connected.");
+                        // Perform initial subscription now that we know we're connected.
+                        if let Err(e) = client_clone
+                            .subscribe(topic_clone.clone(), QoS::AtLeastOnce)
+                            .await
+                        {
+                            error!("Failed to subscribe to MQTT topic: {}.", e);
+                            return Err(anyhow!("Failed to subscribe to topic"));
+                        }
+                        connected = true;
+                        break;
+                    } else {
+                        error!(
+                            "MQTT Consumer connection refused: {:?}.",
+                            ack.code
+                        );
+                        return Err(anyhow!("MQTT Consumer connection refused"));
+                    }
+                }
+                Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                    if message_tx.send(publish).await.is_err() {
+                        info!("MQTT consumer's message channel closed while waiting for connack. Exiting.");
+                        break;
+                    }
+                }
+                Err(rumqttc::ConnectionError::Tls(e)) => {
+                    error!("MQTT Consumer TLS error: {}.", e);
+                    return Err(anyhow!("MQTT Consumer TLS error"));
+                }
+                Err(e) => {
+                    error!("MQTT Consumer eventloop error while waiting for connack: {}. retrying...", e);
+                }
+                _ => {}
+            }
+        }
+
+        if !connected {
+            return Err(anyhow!("Timeout waiting for MQTT Consumer ConnAck"));
+        }
+
+        // Spawn a dedicated task to continue polling the eventloop
         let eventloop_handle = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
-                    Ok(Event::Incoming(Incoming::Publish(p))) => {
-                        if message_tx.send(p).await.is_err() {
-                            // Receiver was dropped, so we can exit
+                    Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                        if message_tx.send(publish).await.is_err() {
+                            info!("MQTT consumer's message channel closed. Exiting eventloop.");
                             break;
                         }
                     }
-                    Ok(Event::Incoming(Incoming::Disconnect)) => {
-                        error!("MQTT Source disconnected.");
+                    Err(rumqttc::ConnectionError::Tls(e)) => {
+                        error!("MQTT Consumer TLS error: {}. Halting event loop.", e);
                         break;
                     }
                     Err(e) => {
-                        error!("MQTT Source eventloop error: {}", e);
-                        break;
-                    }
-                    Ok(Event::Outgoing(rumqttc::Outgoing::Subscribe(_))) => {
-                        info!(topic = %topic_clone, "MQTT source subscribed");
+                        error!("MQTT Consumer eventloop error: {}. rumqttc will attempt to reconnect.", e);
                     }
                     _ => {} // Ignore other events
                 }
             }
         });
 
-        // The rumqttc client will queue this and send it once the connection is established by the eventloop.
-        client.subscribe(topic, QoS::AtLeastOnce).await?;
-
         Ok(Self {
             _client: client,
             message_rx,
-            _eventloop_handle: Arc::new(eventloop_handle),
+            eventloop_handle: Arc::new(eventloop_handle),
         })
     }
 }
@@ -111,7 +226,7 @@ impl MqttConsumer {
 impl Drop for MqttConsumer {
     fn drop(&mut self) {
         // When the source is dropped, abort its background eventloop task.
-        self._eventloop_handle.abort();
+        self.eventloop_handle.abort();
     }
 }
 
@@ -264,6 +379,9 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
         .host_str()
         .ok_or_else(|| anyhow!("No host in URL"))?
         .to_string();
+    // Prefer IPv4 localhost to avoid macOS resolving `localhost` to ::1
+    // which can bypass Docker Desktop port forwarding in some setups.
+    let host = if host == "localhost" { "127.0.0.1".to_string() } else { host };
     let port = url
         .port()
         .unwrap_or(if url.scheme() == "mqtts" || url.scheme() == "ssl" {
