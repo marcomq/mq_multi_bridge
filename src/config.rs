@@ -91,6 +91,12 @@ pub struct HttpConfig {
     pub tls: TlsConfig, // Server-side TLS does not use accept_invalid_certs
 }
 
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]
+pub struct MemoryConfig {
+    pub topic: String,
+    pub capacity: Option<usize>,
+}
+
 impl TlsConfig {
     /// Checks if client-side mTLS is configured.
     pub fn is_mtls_client_configured(&self) -> bool {
@@ -118,6 +124,7 @@ pub enum ConnectionType {
     File(FileConfig),
     Http(HttpConfig),
     Static(StaticEndpoint),
+    Memory(MemoryConfig),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -154,6 +161,9 @@ pub struct StaticEndpoint {
     #[serde(default = "default_static_response_content")]
     pub content: String,
 }
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryEndpoint {}
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -205,6 +215,7 @@ pub enum PublisherEndpointType {
     File(FilePublisherEndpoint),
     Http(HttpPublisherEndpoint),
     Static(StaticEndpoint),
+    Memory(MemoryPublisherEndpoint),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -227,6 +238,7 @@ pub enum ConsumerEndpointType {
     File(FileConsumerEndpoint),
     Http(HttpConsumerEndpoint),
     Static(StaticEndpoint),
+    Memory(MemoryConsumerEndpoint),
 }
 fn default_static_response_content() -> String {
     "OK".to_string()
@@ -297,6 +309,14 @@ pub struct HttpConsumerEndpoint {
     pub endpoint: HttpEndpoint,
 }
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryConsumerEndpoint {
+    #[serde(flatten)]
+    pub config: MemoryConfig,
+    #[serde(flatten)]
+    pub endpoint: MemoryEndpoint,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct KafkaPublisherEndpoint {
     #[serde(flatten)]
@@ -343,6 +363,14 @@ pub struct HttpPublisherEndpoint {
     pub config: HttpConfig,
     #[serde(flatten)]
     pub endpoint: HttpEndpoint,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryPublisherEndpoint {
+    #[serde(flatten)]
+    pub config: MemoryConfig,
+    #[serde(flatten)]
+    pub endpoint: MemoryEndpoint,
 }
 
 #[derive(Debug, Deserialize, Clone)]

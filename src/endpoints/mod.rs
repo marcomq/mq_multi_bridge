@@ -8,6 +8,7 @@ pub mod file;
 pub mod http;
 pub mod kafka;
 pub mod mqtt;
+pub mod memory;
 pub mod nats;
 pub mod static_endpoint;
 
@@ -66,6 +67,9 @@ pub async fn create_consumer_from_route(
         ConsumerEndpointType::Static(cfg) => {
             Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
+        ConsumerEndpointType::Memory(cfg) => {
+            Ok(Box::new(memory::MemoryConsumer::new(&memory::get_or_create_channel(&cfg.config))))
+        }
     }
 }
 
@@ -113,6 +117,9 @@ pub async fn create_publisher_from_route(
         PublisherEndpointType::Static(cfg) => Ok(Arc::new(
             static_endpoint::StaticEndpointPublisher::new(cfg)?,
         )),
+        PublisherEndpointType::Memory(cfg) => {
+            Ok(Arc::new(memory::MemoryPublisher::new(&memory::get_or_create_channel(&cfg.config))))
+        }
     }
 }
 
