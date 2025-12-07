@@ -1,4 +1,5 @@
-use std::{
+#![allow(dead_code)]
+ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };

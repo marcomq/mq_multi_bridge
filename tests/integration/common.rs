@@ -1,13 +1,13 @@
+#![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
 use mq_multi_bridge::config::Config as AppConfig;
-use mq_multi_bridge::consumers::MessageConsumer;
+use mq_multi_bridge::consumers::{CommitFunc, MessageConsumer};
 use mq_multi_bridge::model::CanonicalMessage;
 use mq_multi_bridge::publishers::MessagePublisher;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::any::Any;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -117,54 +117,34 @@ impl Drop for DockerCompose {
     }
 }
 
-pub fn read_output_file(path: &std::path::Path) -> HashSet<String> {
-    if !path.exists() {
-        println!(
-            "WARNING: Output file not found: {:?}. Assuming no messages were received.",
-            path
-        );
-        return HashSet::new();
-    }
-    let file =
-        File::open(path).unwrap_or_else(|_| panic!("Failed to open output file: {:?}", path));
-    let reader = BufReader::new(file);
-    let mut received_messages = HashSet::new();
-
-    for line in reader.lines() {
-        let line = line.unwrap();
-        if line.is_empty() {
-            continue;
-        }
-        let payload: Value = serde_json::from_str(&line)
-            .unwrap_or_else(|_| panic!("Failed to parse line: {}", line));
-        let msg = CanonicalMessage::from_json(payload).unwrap();
-        received_messages.insert(msg.message_id.to_string());
-    }
-    received_messages
+pub fn read_and_drain_memory_channel(
+    channel: &mq_multi_bridge::endpoints::memory::MemoryChannel,
+) -> HashSet<String> {
+    channel
+        .drain_messages()
+        .into_iter()
+        .map(|msg| msg.message_id.to_string())
+        .collect()
 }
 
-pub fn generate_test_file(path: &std::path::Path, num_messages: usize) -> HashSet<String> {
-    let mut file = File::create(path).unwrap();
+pub fn generate_test_messages(num_messages: usize) -> (Vec<CanonicalMessage>, HashSet<String>) {
     let mut sent_messages = HashSet::new();
+    let mut messages = Vec::new();
 
     for i in 0..num_messages {
         let payload = json!({ "message_num": i, "test_id": "integration" });
         let msg = CanonicalMessage::from_json(payload.clone()).unwrap();
-        writeln!(file, "{}", serde_json::to_string(&payload).unwrap()).unwrap();
         sent_messages.insert(msg.message_id.to_string());
+        messages.push(msg);
     }
-    sent_messages
+    (messages, sent_messages)
 }
 
 pub async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     let temp_dir = tempdir().unwrap();
-    let input_path = temp_dir.path().join("input.log");
-    let output_path = temp_dir
-        .path()
-        .join(format!("output_{}.log", broker_name.to_lowercase()));
 
     let num_messages = 5;
-    let sent_message_ids = generate_test_file(&input_path, num_messages);
+    let (messages_to_send, sent_message_ids) = generate_test_messages(num_messages);
 
     let full_config_settings = config::Config::builder()
         .add_source(ConfigFile::with_name(config_file_name).required(true))
@@ -176,36 +156,25 @@ pub async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     test_config.log_level = "info".to_string();
     test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
 
-    let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
-    let broker_to_file_route = format!("{}_to_file", broker_name.to_lowercase());
-    let mut route_to_broker = full_config
+    let memory_to_broker_route_name = format!("memory_to_{}", broker_name.to_lowercase());
+    let broker_to_memory_route_name = format!("{}_to_memory", broker_name.to_lowercase());
+    let route_to_broker = full_config
         .routes
-        .get(&file_to_broker_route)
+        .get(&memory_to_broker_route_name)
         .unwrap()
         .clone();
-    let mut route_from_broker = full_config
+    let route_from_broker = full_config
         .routes
-        .get(&broker_to_file_route)
+        .get(&broker_to_memory_route_name)
         .unwrap()
         .clone();
 
-    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
-        &mut route_to_broker.r#in.endpoint_type
-    {
-        f.config.path = input_path.to_str().unwrap().to_string();
-    }
-    if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
-        &mut route_from_broker.out.endpoint_type
-    {
-        f.config.path = output_path.to_str().unwrap().to_string();
-    }
-
     test_config
         .routes
-        .insert(file_to_broker_route.to_string(), route_to_broker);
+        .insert(memory_to_broker_route_name.to_string(), route_to_broker);
     test_config
         .routes
-        .insert(broker_to_file_route.to_string(), route_from_broker);
+        .insert(broker_to_memory_route_name.to_string(), route_from_broker);
 
     println!("--- Using Test Configuration for {} ---", broker_name);
 
@@ -215,12 +184,29 @@ pub async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     let shutdown_tx = bridge.get_shutdown_handle();
     let bridge_task = bridge.run();
 
+    // Get the memory channels to interact with the bridge
+    let in_channel = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+        &mq_multi_bridge::config::MemoryConfig {
+            topic: "test-in".to_string(),
+            ..Default::default()
+        },
+    );
+    let out_channel = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+        &mq_multi_bridge::config::MemoryConfig {
+            topic: "test-out".to_string(),
+            ..Default::default()
+        },
+    );
+
+    // Send messages to the input channel
+    in_channel.fill_messages(messages_to_send).await.unwrap();
+
     let timeout = Duration::from_secs(30);
     let start_time = std::time::Instant::now();
 
     while start_time.elapsed() < timeout {
-        let sent_count =
-            metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
+        let sent_count = metrics
+            .get_cumulative_counter("bridge_messages_received_total", &broker_to_memory_route_name);
         if sent_count >= num_messages as u64 {
             println!(
                 "[{}] Metrics show {} messages sent. Proceeding to verification.",
@@ -237,7 +223,7 @@ pub async fn run_pipeline_test(broker_name: &str, config_file_name: &str) {
     }
     let _ = bridge_task.await;
 
-    let received_ids = read_output_file(&output_path);
+    let received_ids = read_and_drain_memory_channel(&out_channel);
     assert_eq!(
         received_ids.len(),
         num_messages,
@@ -260,16 +246,12 @@ pub async fn run_performance_pipeline_test(
     num_messages: usize,
 ) {
     let temp_dir = tempdir().unwrap();
-    let input_path = temp_dir.path().join("input.log");
-    let output_path = temp_dir
-        .path()
-        .join(format!("output_{}.log", broker_name.to_lowercase()));
 
     println!(
         "[{}] Generating {} messages for performance test...",
         broker_name, num_messages
     );
-    let sent_message_ids = generate_test_file(&input_path, num_messages);
+    let (messages_to_send, sent_message_ids) = generate_test_messages(num_messages);
     println!("[{}] Finished generating messages.", broker_name);
 
     let full_config_settings = config::Config::builder()
@@ -282,36 +264,25 @@ pub async fn run_performance_pipeline_test(
     test_config.log_level = "info".to_string();
     test_config.sled_path = temp_dir.path().join("db").to_str().unwrap().to_string();
 
-    let file_to_broker_route = format!("file_to_{}", broker_name.to_lowercase());
-    let broker_to_file_route = format!("{}_to_file", broker_name.to_lowercase());
-    let mut route_to_broker = full_config
+    let memory_to_broker_route_name = format!("memory_to_{}", broker_name.to_lowercase());
+    let broker_to_memory_route_name = format!("{}_to_memory", broker_name.to_lowercase());
+    let route_to_broker = full_config
         .routes
-        .get(&file_to_broker_route)
+        .get(&memory_to_broker_route_name)
         .unwrap()
         .clone();
-    let mut route_from_broker = full_config
+    let route_from_broker = full_config
         .routes
-        .get(&broker_to_file_route)
+        .get(&broker_to_memory_route_name)
         .unwrap()
         .clone();
 
-    if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
-        &mut route_to_broker.r#in.endpoint_type
-    {
-        f.config.path = input_path.to_str().unwrap().to_string();
-    }
-    if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
-        &mut route_from_broker.out.endpoint_type
-    {
-        f.config.path = output_path.to_str().unwrap().to_string();
-    }
-
     test_config
         .routes
-        .insert(file_to_broker_route.to_string(), route_to_broker);
+        .insert(memory_to_broker_route_name.to_string(), route_to_broker);
     test_config
         .routes
-        .insert(broker_to_file_route.to_string(), route_from_broker);
+        .insert(broker_to_memory_route_name.to_string(), route_from_broker);
 
     let mut bridge = mq_multi_bridge::Bridge::new(test_config);
     let shutdown_tx = bridge.get_shutdown_handle();
@@ -320,12 +291,29 @@ pub async fn run_performance_pipeline_test(
     let metrics = TestMetrics::new();
 
     let start_time = std::time::Instant::now();
+
+    // Get the memory channels to interact with the bridge
+    let in_channel = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+        &mq_multi_bridge::config::MemoryConfig {
+            topic: "test-in".to_string(),
+            ..Default::default()
+        },
+    );
+    let out_channel = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+        &mq_multi_bridge::config::MemoryConfig {
+            topic: "test-out".to_string(),
+            ..Default::default()
+        },
+    );
+
     let bridge_handle = bridge.run();
+
+    in_channel.fill_messages(messages_to_send).await.unwrap();
 
     let timeout = Duration::from_secs(40);
     while start_time.elapsed() < timeout {
-        let sent_count =
-            metrics.get_cumulative_counter("bridge_messages_received_total", &broker_to_file_route);
+        let sent_count = metrics
+            .get_cumulative_counter("bridge_messages_received_total", &broker_to_memory_route_name);
         if sent_count >= num_messages as u64 {
             println!(
                 "[{}] Metrics show {} messages sent. Proceeding to verification.",
@@ -337,7 +325,7 @@ pub async fn run_performance_pipeline_test(
     }
     bridge.flush_routes().await;
 
-    let received_ids = read_output_file(&output_path);
+    let received_ids = read_and_drain_memory_channel(&out_channel);
     assert_eq!(
         received_ids.len(),
         num_messages,
@@ -413,6 +401,7 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let _docker = DockerCompose::new(compose_file);
+    // Give some time for docker to be ready
     _docker.up();
     test_fn().await;
 }
@@ -482,6 +471,24 @@ pub async fn measure_write_performance(
         "  Wrote {} messages in {:.2?} ({:.2} msgs/sec)",
         num_messages, duration, msgs_per_sec
     );
+}
+
+/// A mock consumer that does nothing, useful for testing publishers in isolation.
+#[derive(Clone)]
+pub struct MockConsumer;
+
+#[async_trait::async_trait]
+impl MessageConsumer for MockConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        // This consumer will block forever, which is fine for tests that only need a publisher.
+        // It prevents the route from exiting immediately.
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        unreachable!();
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 pub async fn measure_read_performance(

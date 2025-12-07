@@ -13,7 +13,7 @@ use metrics::{counter, histogram};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Barrier};
+use tokio::sync::{Barrier, Mutex, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, trace};
@@ -183,111 +183,98 @@ impl RouteRunner {
         name: &str,
         route: &Route,
         shutdown_rx: &mut watch::Receiver<()>,
-        mut consumer: Box<dyn MessageConsumer>,
+        consumer: Box<dyn MessageConsumer>,
         publisher: Arc<dyn MessagePublisher>,
         dlq_publisher: Option<Arc<dyn MessagePublisher>>,
         dedup_store: Arc<DeduplicationStore>,
-        command_rx: mpsc::Receiver<RouteRunnerCommand>,
+        mut command_rx: mpsc::Receiver<RouteRunnerCommand>,
     ) -> Result<(), (anyhow::Error, mpsc::Receiver<RouteRunnerCommand>)> {
         let concurrency = route.concurrency.unwrap_or(10);
-        // Use an MPMC channel to allow multiple workers to receive concurrently without a mutex.
-        let (tx, rx) = async_channel::bounded(concurrency);
+
+        // Ensure we are always working with a buffered consumer for performance.
+        let consumer = if consumer.as_any().is::<crate::consumers::BufferedConsumer>() {
+            consumer
+        } else {
+            info!("Wrapping consumer in a BufferedConsumer for improved performance.");
+            // Use concurrency * 2 as a heuristic for a good buffer size.
+            Box::new(crate::consumers::BufferedConsumer::new(
+                consumer,
+                concurrency * 2,
+            ))
+        };
+
+        let consumer = Arc::new(Mutex::new(consumer));
         let mut tasks = JoinSet::new();
-
-        // --- Message Receiver Task ---
-        // This task's only job is to receive messages and send them to the processing channel.
-        let mut producer_shutdown_rx = shutdown_rx.clone();
-        tasks.spawn(async move {
-            loop {
-                let message_data_result: Result<_, anyhow::Error> = tokio::select! {
-                    _ = producer_shutdown_rx.changed() => {
-                        info!("Shutdown signal received in producer. Stopping message reception.");
-                        return Ok(()); // Gracefully exit the task
-                    }
-                    result = consumer.receive() => result,
-                };
-
-                match message_data_result {
-                    Ok((message_data, commit_fn)) => {
-                        if tx.send((message_data, commit_fn)).await.is_err() {
-                            info!("Processing channel closed. Stopping producer.");
-                            break; // Exit loop
-                        }
-                    }
-                    Err(e) => {
-                        if e.to_string().contains("End of file") {
-                            info!("Consumer reached end of stream. Shutting down producer.");
-                        } else {
-                            error!(error = %e, "Unrecoverable consumer error. Shutting down producer task.");
-                            return Err(e); // Propagate the error
-                        }
-                        break; // Exit loop on EOF or other handled errors
-                    }
-                };
-            }
-            Ok(())
-        });
 
         // --- Message Worker Tasks ---
         // Spawn a pool of workers to process messages concurrently.
-        let consumer_shutdown_rx = shutdown_rx.clone();
         let deduplication_enabled = route.deduplication_enabled;
         for _ in 0..concurrency {
             let route_name = name.to_string();
             let dedup = dedup_store.clone();
             let publisher = publisher.clone();
             let dlq_publisher = dlq_publisher.clone();
-            let rx_clone = rx.clone();
-            let mut consumer_shutdown_rx = consumer_shutdown_rx.clone();
+            let consumer = consumer.clone();
+            let mut worker_shutdown_rx = shutdown_rx.clone();
 
             tasks.spawn(async move {
                 // Each worker task runs a loop, processing messages until the channel is closed.
                 loop {
-                    tokio::select! {
+                    let mut guard = tokio::select! {
                         biased;
-                        _ = consumer_shutdown_rx.changed() => {
+                        _ = worker_shutdown_rx.changed() => {
                             info!("Shutdown signal received in worker. Exiting.");
                             break;
                         }
-                        result = rx_clone.recv() => {
-                            let Ok((message, commit_fn)) = result else {
-                                // Channel is empty and disconnected, so we can exit.
-                                break;
-                            };
-                            trace!(msg_id = %message.message_id, "Worker picked up message from channel.");
+                        guard = consumer.lock() => guard,
+                    };
 
-                            let msg_id = message.message_id;
-                            let start_time = std::time::Instant::now();
+                    let result = guard.receive().await;
 
-                            if deduplication_enabled
-                                && dedup.is_duplicate(&msg_id).unwrap_or(false) {
-                                    trace!(%msg_id, "Duplicate message, skipping.");
-                                    counter!("bridge_messages_duplicate_total", "route" => route_name.clone()).increment(1);
-                                    commit_fn(None).await; // Acknowledge the duplicate
-                                    continue;
-                                }
+                    let (message, commit_fn) = match result {
+                        Ok(data) => data,
+                        Err(e) => {
+                            // The consumer has failed or the stream has ended (e.g., EOF).
+                            // This worker's job is done.
+                            if !e.to_string().contains("BufferedConsumer channel has been closed") {
+                                trace!(error = %e, "Consumer failed, worker exiting.");
+                            } else {
+                                trace!("Consumer stream ended, worker exiting.");
+                            }
+                            break;
+                        }
+                    };
+                    trace!(msg_id = %message.message_id, "Worker picked up message from channel.");
 
-                            counter!("bridge_messages_received_total", "route" => route_name.clone()).increment(1);
+                    let msg_id = message.message_id;
+                    let start_time = std::time::Instant::now();
 
-                            trace!(%msg_id, "Sending message to publisher.");
-                            match publisher.send(message.clone()).await {
-                                Ok(response) => {
-                                    histogram!("bridge_message_processing_duration_seconds", "route" => route_name.clone()).record(start_time.elapsed().as_secs_f64());
-                                    counter!("bridge_messages_sent_total", "route" => route_name.clone()).increment(1);
-                                    trace!(%msg_id, "Message sent successfully.");
-                                    commit_fn(response).await;
-                                }
-                                Err(e) => {
-                                    error!(%msg_id, error = %e, "Failed to send message, attempting DLQ.");
-                                    counter!("bridge_messages_dlq_total", "route" => route_name.clone()).increment(1);
-                                    if let Some(dlq) = dlq_publisher.clone() {
-                                        if let Err(dlq_err) = dlq.send(message).await {
-                                            error!(%msg_id, error = %dlq_err, "Failed to send message to DLQ.");
-                                        }
-                                    }
-                                    commit_fn(None).await; // Acknowledge after DLQ attempt
+                    if deduplication_enabled && dedup.is_duplicate(&msg_id).unwrap_or(false) {
+                        trace!(%msg_id, "Duplicate message, skipping.");
+                        counter!("bridge_messages_duplicate_total", "route" => route_name.clone()).increment(1);
+                        commit_fn(None).await; // Acknowledge the duplicate
+                        continue;
+                    }
+
+                    counter!("bridge_messages_received_total", "route" => route_name.clone()).increment(1);
+
+                    trace!(%msg_id, "Sending message to publisher.");
+                    match publisher.send(message.clone()).await {
+                        Ok(response) => {
+                            histogram!("bridge_message_processing_duration_seconds", "route" => route_name.clone()).record(start_time.elapsed().as_secs_f64());
+                            counter!("bridge_messages_sent_total", "route" => route_name.clone()).increment(1);
+                            trace!(%msg_id, "Message sent successfully.");
+                            commit_fn(response).await;
+                        }
+                        Err(e) => {
+                            error!(%msg_id, error = %e, "Failed to send message, attempting DLQ.");
+                            counter!("bridge_messages_dlq_total", "route" => route_name.clone()).increment(1);
+                            if let Some(dlq) = dlq_publisher.clone() {
+                                if let Err(dlq_err) = dlq.send(message).await {
+                                    error!(%msg_id, error = %dlq_err, "Failed to send message to DLQ.");
                                 }
                             }
+                            commit_fn(None).await; // Acknowledge after DLQ attempt
                         }
                     }
                 }
@@ -297,8 +284,7 @@ impl RouteRunner {
 
         // --- Main Processing and Command Loop ---
         let mut flush_interval = tokio::time::interval(Duration::from_millis(100));
-        let mut command_rx = command_rx; // Make it mutable here
-        loop {
+        'main_loop: loop {
             tokio::select! {
                 // Handle commands for this route
                 Some(command) = command_rx.recv() => {
@@ -317,31 +303,39 @@ impl RouteRunner {
                 // Check for task completion or failure
                 Some(res) = tasks.join_next() => {
                     match res {
-                        Ok(Ok(_)) => {
-                            // A task finished gracefully. If all tasks are done, we can exit.
+                        Ok(Ok(())) => {
+                            trace!("A worker task finished gracefully.");
+                            // If all workers have finished, we can exit the main loop.
                             if tasks.is_empty() {
-                                break;
+                                info!("All worker tasks have completed.");
+                                break 'main_loop;
                             }
                         },
                         Ok(Err(e)) => {
-                            // An unrecoverable error from the consumer task.
+                            error!(error = %e, "A consumer task finished with an error.");
                             tasks.abort_all();
                             return Err((e, command_rx));
                         },
                         Err(join_err) if join_err.is_cancelled() => {
-                            // Task was cancelled, probably by abort_all. Continue draining.
+                            trace!("A task was cancelled.");
                         },
                         Err(join_err) => {
-                            // A task panicked. This is a critical error.
+                            error!(error = %join_err, "A route task panicked.");
                             let panic_err = anyhow::anyhow!("A route task panicked: {}", join_err);
                             tasks.abort_all();
                             return Err((panic_err, command_rx));
                         }
                     }
                 },
-                else => break, // All tasks are complete
+                else => {
+                    info!("All route tasks have completed.");
+                    break 'main_loop;
+                }
             }
         }
+
+        info!("Shutting down and waiting for all worker tasks to complete.");
+        tasks.shutdown().await;
 
         // After all tasks are done, explicitly flush the publisher to ensure all buffered
         // messages are written before the route runner exits. This is crucial for file-based

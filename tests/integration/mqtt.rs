@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::common::{
     measure_read_performance, measure_write_performance, run_performance_pipeline_test,
     run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,

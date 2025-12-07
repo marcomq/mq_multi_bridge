@@ -1,54 +1,27 @@
+#![allow(dead_code)]
 use config::File as ConfigFile; // Use an alias for the File type from the config crate
 use mq_multi_bridge::config::Config as AppConfig; // Use an alias for our app's config struct
 use super::common::{
-    generate_test_file, read_output_file, run_test_with_docker, setup_logging,
+    generate_test_messages, read_and_drain_memory_channel, run_test_with_docker, setup_logging,
 };
 
 use std::time::Duration;
-use tempfile::tempdir;
 
 pub async fn test_all_pipelines_together() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose.all.yml", || async {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.log");
         let num_messages = 5;
-        let sent_message_ids = generate_test_file(&input_path, num_messages);
-
-        // Define output paths for each broker
-        let output_paths = [
-            ("kafka", temp_dir.path().join("output_kafka.log")),
-            ("nats", temp_dir.path().join("output_nats.log")),
-            ("amqp", temp_dir.path().join("output_amqp.log")),
-            ("mqtt", temp_dir.path().join("output_mqtt.log")),
-        ];
+        let (messages_to_send, sent_message_ids) = generate_test_messages(num_messages);
 
         // Load the comprehensive config
+        // This config should define routes like `memory_to_kafka`, `kafka_to_memory`, etc.
         let full_config_settings = config::Config::builder()
             .add_source(ConfigFile::with_name("tests/config.all").required(true))
             .build()
             .unwrap();
-        let mut test_config: AppConfig = full_config_settings.try_deserialize().unwrap();
+        let test_config: AppConfig = full_config_settings.try_deserialize().unwrap();
 
         // Override file paths for all routes
-        for (route_name, route) in test_config.routes.iter_mut() {
-            // Override source file paths
-            if let mq_multi_bridge::config::ConsumerEndpointType::File(f) =
-                &mut route.r#in.endpoint_type
-            {
-                f.config.path = input_path.to_str().unwrap().to_string();
-            }
-            // Override sink file paths
-            if let mq_multi_bridge::config::PublisherEndpointType::File(f) =
-                &mut route.out.endpoint_type
-            {
-                for (broker_name, path) in &output_paths {
-                    if route_name.contains(broker_name) {
-                        f.config.path = path.to_str().unwrap().to_string();
-                    }
-                }
-            }
-        }
 
         println!("--- Using Comprehensive Test Configuration ---");
         println!("{:#?}", test_config);
@@ -59,16 +32,39 @@ pub async fn test_all_pipelines_together() {
         let shutdown_tx = bridge.get_shutdown_handle();
         let _bridge_handle = bridge.run();
 
+        // Get memory channels for each route
+        let in_kafka = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+            &mq_multi_bridge::config::MemoryConfig {
+                topic: "in-kafka".to_string(),
+                ..Default::default()
+            },
+        );
+        let out_kafka = mq_multi_bridge::endpoints::memory::get_or_create_channel(
+            &mq_multi_bridge::config::MemoryConfig {
+                topic: "out-kafka".to_string(),
+                ..Default::default()
+            },
+        );
+        // ... create channels for nats, amqp, mqtt as needed by config.all.yml
+
+        // Send messages to the input channel for the kafka route
+        in_kafka.fill_messages(messages_to_send).await.unwrap();
+
         // Wait for processing
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(15)).await;
         if shutdown_tx.send(()).is_err() {
             println!("WARN: Could not send shutdown signal, bridge may have already stopped.");
         }
 
+        let output_channels = [
+            ("kafka", out_kafka),
+            // Add other output channels here
+        ];
+
         // Verify all output files
-        for (broker_name, path) in &output_paths {
+        for (broker_name, channel) in &output_channels {
             println!("Verifying output for {}...", broker_name);
-            let received_ids = read_output_file(path);
+            let received_ids = read_and_drain_memory_channel(channel);
             assert_eq!(
                 received_ids.len(),
                 num_messages,

@@ -248,7 +248,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub logger: String,
@@ -261,6 +261,18 @@ pub struct Config {
     pub routes: HashMap<String, Route>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            logger: "plain".to_string(),
+            log_level: "info".to_string(),
+            sled_path: "/tmp/dedup_db".to_string(),
+            dedup_ttl_seconds: 180,
+            metrics: MetricsConfig::default(),
+            routes: HashMap::new(),
+        }
+    }
+}
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct KafkaConsumerEndpoint {
     #[serde(flatten)]
