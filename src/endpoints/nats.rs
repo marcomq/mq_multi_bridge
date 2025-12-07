@@ -3,7 +3,7 @@ use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
 use crate::publishers::MessagePublisher;
 use anyhow::anyhow;
-use async_nats::{jetstream, jetstream::stream, ConnectOptions};
+use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
@@ -67,9 +67,16 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        let mut headers = HeaderMap::new();
+        if !message.metadata.is_empty() {
+            for (key, value) in &message.metadata {
+                headers.insert(key.as_str(), value.as_str());
+            }
+        }
+
         let ack_future = self
             .jetstream
-            .publish(self.subject.clone(), message.payload.into())
+            .publish_with_headers(self.subject.clone(), headers, message.payload.into())
             .await?;
 
         if self.await_ack {
@@ -152,7 +159,18 @@ impl MessageConsumer for NatsConsumer {
             .await
             .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
 
-        let canonical_message = CanonicalMessage::new(message.payload.to_vec());
+        let mut canonical_message = CanonicalMessage::new(message.payload.to_vec());
+
+        if let Some(headers) = &message.headers {
+            let mut metadata = std::collections::HashMap::new();
+            for (key, value) in headers.iter() {
+                // A header key can have multiple values. We'll just take the first one.
+                if let Some(first_value) = value.iter().next() {
+                    metadata.insert(key.to_string(), first_value.to_string());
+                }
+            }
+            canonical_message.metadata = metadata;
+        }
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {

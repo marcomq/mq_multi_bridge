@@ -75,7 +75,6 @@ pub struct MqttConfig {
     pub password: Option<String>,
     // The capacity of the internal message queue for the MQTT client.
     pub queue_capacity: Option<usize>,
-    
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, Hash)]

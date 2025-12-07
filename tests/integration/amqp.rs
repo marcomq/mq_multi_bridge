@@ -19,7 +19,7 @@ struct TestManager {
 }
 
 #[ctor]
-static TEST_MANAGER: TestManager = {
+static AMQP_TEST_MANAGER: TestManager = {
     common::setup_logging();
     let manager = TestManager {
         docker: DockerCompose::new("tests/docker-compose.amqp.yml"),
@@ -30,21 +30,18 @@ static TEST_MANAGER: TestManager = {
 
 #[dtor]
 fn shutdown() {
-    TEST_MANAGER.docker.down();
+    AMQP_TEST_MANAGER.docker.down();
 }
 
-#[tokio::test]
-async fn test_amqp_pipeline() {
+pub async fn test_amqp_pipeline() {
     run_pipeline_test("AMQP", "tests/config.amqp").await;
 }
 
-#[tokio::test]
-async fn test_amqp_performance_pipeline() {
+pub async fn test_amqp_performance_pipeline() {
     run_performance_pipeline_test("AMQP", "tests/config.amqp", PERF_TEST_MESSAGE_COUNT).await;
 }
 
-#[tokio::test]
-async fn test_amqp_performance_direct() {
+pub async fn test_amqp_performance_direct() {
     let queue = "perf_test_amqp_direct";
     let config = mq_multi_bridge::config::AmqpConfig {
         url: "amqp://guest:guest@localhost:5672/%2f".to_string(),

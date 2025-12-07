@@ -20,7 +20,7 @@ struct TestManager {
 }
 
 #[ctor]
-static TEST_MANAGER: TestManager = {
+static MQTT_TEST_MANAGER: TestManager = {
     common::setup_logging();
     let manager = TestManager {
         docker: DockerCompose::new("tests/docker-compose.mqtt.yml"),
@@ -31,23 +31,20 @@ static TEST_MANAGER: TestManager = {
 
 #[dtor]
 fn shutdown() {
-    TEST_MANAGER.docker.down();
+    MQTT_TEST_MANAGER.docker.down();
 }
 
-#[tokio::test]
-async fn test_mqtt_pipeline() {
+pub async fn test_mqtt_pipeline() {
     let test_name = format!("MQTT-{}", Uuid::new_v4().as_simple());
     run_pipeline_test(&test_name, "tests/config.mqtt").await;
 }
 
-#[tokio::test]
-async fn test_mqtt_performance_pipeline() {
+pub async fn test_mqtt_performance_pipeline() {
     let test_name = format!("MQTT-Perf-{}", Uuid::new_v4().as_simple());
     run_performance_pipeline_test(&test_name, "tests/config.mqtt", PERF_TEST_MESSAGE_COUNT).await;
 }
 
-#[tokio::test]
-async fn test_mqtt_performance_direct() {
+pub async fn test_mqtt_performance_direct() {
     let unique_id = Uuid::new_v4().as_simple().to_string();
     let topic = "test_topic_mqtt/direct";
     let publisher_id = format!("perftest-pub-{}", unique_id);

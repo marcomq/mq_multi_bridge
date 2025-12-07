@@ -2,7 +2,6 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq_multi_bridge
-
 pub mod bridge;
 pub mod config;
 pub mod consumers;

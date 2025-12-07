@@ -1,11 +1,8 @@
-// cargo test --test integration_test --features integration-test --release -- --ignored --nocapture --test-threads=1 --show-output
-
 mod common;
 
 use config::File as ConfigFile; // Use an alias for the File type from the config crate
 use ctor::{ctor, dtor};
 use mq_multi_bridge::config::Config as AppConfig; // Use an alias for our app's config struct
-
 use common::{generate_test_file, read_output_file, DockerCompose};
 use std::collections::HashSet;
 
@@ -18,7 +15,7 @@ struct TestManager {
 }
 
 #[ctor]
-static TEST_MANAGER: TestManager = {
+static ALL_ENDPOINTS_TEST_MANAGER: TestManager = {
     common::setup_logging();
     let manager = TestManager {
         docker: DockerCompose::new("tests/docker-compose.all.yml"),
@@ -29,11 +26,10 @@ static TEST_MANAGER: TestManager = {
 
 #[dtor]
 fn shutdown() {
-    TEST_MANAGER.docker.down();
+    ALL_ENDPOINTS_TEST_MANAGER.docker.down();
 }
 
-#[tokio::test]
-async fn test_all_pipelines_together() {
+pub async fn test_all_pipelines_together() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.log");
     let num_messages = 5;

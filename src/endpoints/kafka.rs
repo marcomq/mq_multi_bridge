@@ -7,11 +7,13 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
     consumer::{CommitMode, Consumer, StreamConsumer},
     error::RDKafkaErrorCode,
+    message::Headers,
     ClientConfig, Message, TopicPartitionList,
 };
 use std::pin::Pin;
@@ -133,10 +135,21 @@ impl Drop for KafkaPublisher {
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        let mut record = FutureRecord::to(&self.topic).payload(&message.payload);
+
+        if !message.metadata.is_empty() {
+            let mut headers = OwnedHeaders::new();
+            for (key, value) in &message.metadata {
+                headers = headers.insert(rdkafka::message::Header {
+                    key,
+                    value: Some(value.as_bytes()),
+                });
+            }
+            record = record.headers(headers);
+        }
+
         let key = message.message_id.to_string();
-        let record = FutureRecord::to(&self.topic)
-            .payload(&message.payload)
-            .key(&key);
+        record = record.key(&key);
 
         if self.await_ack {
             // Await the delivery report from Kafka, providing at-least-once guarantees per message.
@@ -168,8 +181,12 @@ impl MessagePublisher for KafkaPublisher {
     }
 }
 
-type KafkaMessageStream =
-    Pin<Box<dyn Stream<Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>> + Send>>;
+type KafkaMessageStream = Pin<
+    Box<
+        dyn Stream<Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>>
+            + Send,
+    >,
+>;
 
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
@@ -266,7 +283,18 @@ impl MessageConsumer for KafkaConsumer {
         let payload = message
             .payload()
             .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
-        let canonical_message = CanonicalMessage::new(payload.to_vec());
+        let mut canonical_message = CanonicalMessage::new(payload.to_vec());
+
+        if let Some(headers) = message.headers() {
+            let mut metadata = std::collections::HashMap::new();
+            for header in headers.iter() {
+                metadata.insert(
+                    header.key.to_string(),
+                    String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
+                );
+            }
+            canonical_message.metadata = metadata;
+        }
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.

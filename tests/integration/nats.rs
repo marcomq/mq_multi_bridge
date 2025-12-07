@@ -19,7 +19,7 @@ struct TestManager {
 }
 
 #[ctor]
-static TEST_MANAGER: TestManager = {
+static NATS_TEST_MANAGER: TestManager = {
     common::setup_logging();
     let manager = TestManager {
         docker: DockerCompose::new("tests/docker-compose.nats.yml"),
@@ -30,21 +30,18 @@ static TEST_MANAGER: TestManager = {
 
 #[dtor]
 fn shutdown() {
-    TEST_MANAGER.docker.down();
+    NATS_TEST_MANAGER.docker.down();
 }
 
-#[tokio::test]
-async fn test_nats_pipeline() {
+pub async fn test_nats_pipeline() {
     run_pipeline_test("NATS", "tests/config.nats").await;
 }
 
-#[tokio::test]
-async fn test_nats_performance_pipeline() {
+pub async fn test_nats_performance_pipeline() {
     run_performance_pipeline_test("NATS", "tests/config.nats", PERF_TEST_MESSAGE_COUNT).await;
 }
 
-#[tokio::test]
-async fn test_nats_performance_direct() {
+pub async fn test_nats_performance_direct() {
     let stream_name = "perf_stream_nats_direct";
     let subject = format!("{}.direct", stream_name);
     let config = mq_multi_bridge::config::NatsConfig {

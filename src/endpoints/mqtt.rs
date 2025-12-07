@@ -51,8 +51,7 @@ impl MessagePublisher for MqttPublisher {
             payload = %String::from_utf8_lossy(&message.payload),
             "Publishing MQTT message"
         );
-        self
-            .client
+        self.client
             .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
             .await?;
         Ok(None)
@@ -163,7 +162,10 @@ fn run_eventloop(
                             let _ = tx.send(Ok(()));
                         }
                     } else {
-                        error!("MQTT {} connection refused: {:?}. Halting.", client_type, ack.code);
+                        error!(
+                            "MQTT {} connection refused: {:?}. Halting.",
+                            client_type, ack.code
+                        );
                         if let Some(tx) = ready_tx.take() {
                             let _ = tx.send(Err(anyhow!("Connection refused: {:?}", ack.code)));
                         }
@@ -182,7 +184,10 @@ fn run_eventloop(
                     trace!("MQTT {} received event: {:?}", client_type, event);
                 }
                 Err(e) => {
-                    error!("MQTT {} eventloop error: {}. Reconnecting...", client_type, e);
+                    error!(
+                        "MQTT {} eventloop error: {}. Reconnecting...",
+                        client_type, e
+                    );
                     if let Some(tx) = ready_tx.take() {
                         // If we haven't signaled readiness yet, signal an error.
                         let _ = tx.send(Err(e.into()));
@@ -195,10 +200,11 @@ fn run_eventloop(
         info!("MQTT {} eventloop finished.", client_type);
     });
 
-    (
-        handle,
-        async { ready_rx.await.unwrap_or_else(|_| Err(anyhow!("Sender dropped"))) },
-    )
+    (handle, async {
+        ready_rx
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("Sender dropped")))
+    })
 }
 
 async fn create_client_and_eventloop(
@@ -326,7 +332,11 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
         .to_string();
     // Prefer IPv4 localhost to avoid macOS resolving `localhost` to ::1
     // which can bypass Docker Desktop port forwarding in some setups.
-    let host = if host == "localhost" { "127.0.0.1".to_string() } else { host };
+    let host = if host == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
     let port = url
         .port()
         .unwrap_or(if url.scheme() == "mqtts" || url.scheme() == "ssl" {

@@ -12,13 +12,14 @@ use async_trait::async_trait;
 use axum::{
     body::Bytes,
     extract::State,
-    http::StatusCode,
+    http::{header::HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Router,
 };
 use axum_server::{tls_rustls::RustlsConfig, Handle};
 use std::any::Any;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, instrument};
@@ -119,10 +120,19 @@ impl MessageConsumer for HttpConsumer {
 #[instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
 async fn handle_request(
     State(tx): State<mpsc::Sender<HttpSourceMessage>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let (response_tx, response_rx) = oneshot::channel();
-    let message = CanonicalMessage::new(body.to_vec());
+    let mut message = CanonicalMessage::new(body.to_vec());
+
+    let mut metadata = HashMap::new();
+    for (key, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            metadata.insert(key.as_str().to_string(), value_str.to_string());
+        }
+    }
+    message.metadata = metadata;
 
     if tx.send((message, response_tx)).await.is_err() {
         return (
@@ -135,10 +145,23 @@ async fn handle_request(
     match response_rx.await {
         Ok(Ok(Some(response_message))) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                response_message
+                    .metadata
+                    .get("content-type")
+                    .cloned()
+                    .unwrap_or_else(|| "application/json".to_string()),
+            )],
             response_message.payload,
         )
             .into_response(),
+        // Ok(Ok(Some(response_message))) => (
+        //     StatusCode::OK,
+        //     [(axum::http::header::CONTENT_TYPE, "application/json")],
+        //     response_message.payload,
+        // )
+        //     .into_response(),
         Ok(Ok(None)) => (StatusCode::ACCEPTED, "Message processed").into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -193,15 +216,25 @@ impl HttpPublisher {
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let response = self
-            .client
-            .post(&self.url)
+        let mut request_builder = self.client.post(&self.url);
+        for (key, value) in &message.metadata {
+            request_builder = request_builder.header(key, value);
+        }
+
+        let response = request_builder
             .body(message.payload)
             .send()
             .await
             .with_context(|| format!("Failed to send HTTP request to {}", self.url))?;
 
         let response_status = response.status();
+        let mut response_metadata = HashMap::new();
+        for (key, value) in response.headers() {
+            if let Ok(value_str) = value.to_str() {
+                response_metadata.insert(key.as_str().to_string(), value_str.to_string());
+            }
+        }
+
         let response_bytes = response.bytes().await?.to_vec();
 
         if !response_status.is_success() {
@@ -214,7 +247,9 @@ impl MessagePublisher for HttpPublisher {
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if self.response_sink.is_some() {
-            Ok(Some(CanonicalMessage::new(response_bytes)))
+            let mut response_message = CanonicalMessage::new(response_bytes);
+            response_message.metadata = response_metadata;
+            Ok(Some(response_message))
         } else {
             Ok(None)
         }

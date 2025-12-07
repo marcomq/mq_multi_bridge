@@ -52,7 +52,7 @@ pub struct StaticRequestConsumer {
 impl StaticRequestConsumer {
     pub fn new(config: &StaticEndpoint) -> anyhow::Result<Self> {
         Ok(Self {
-            content : config.content.clone(),
+            content: config.content.clone(),
         })
     }
 }
@@ -62,7 +62,9 @@ impl MessageConsumer for StaticRequestConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         let payload = self.content.as_bytes().to_vec();
         let message = CanonicalMessage::new(payload);
-        let commit = Box::new(|_response: Option<CanonicalMessage>| Box::pin(async {}) as BoxFuture<'static, ()>);
+        let commit = Box::new(|_response: Option<CanonicalMessage>| {
+            Box::pin(async {}) as BoxFuture<'static, ()>
+        });
         Ok((message, commit))
     }
 

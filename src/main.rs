@@ -41,7 +41,7 @@ fn init_logging(config: &Config) {
         "plain" => {
             logger.init();
         }
-         _ => {
+        _ => {
             logger.init();
         }
     }

@@ -63,6 +63,18 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        let mut properties = BasicProperties::default();
+        if !message.metadata.is_empty() {
+            let mut table = FieldTable::default();
+            for (key, value) in message.metadata {
+                table.insert(
+                    key.into(),
+                    lapin::types::AMQPValue::LongString(value.into()),
+                );
+            }
+            properties = properties.with_headers(table);
+        }
+
         let confirmation = self
             .channel
             .basic_publish(
@@ -70,7 +82,7 @@ impl MessagePublisher for AmqpPublisher {
                 &self.routing_key,
                 BasicPublishOptions::default(),
                 &message.payload,
-                BasicProperties::default(),
+                properties,
             )
             .await?;
 
@@ -187,7 +199,16 @@ impl MessageConsumer for AmqpConsumer {
             .await
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
 
-        let message = CanonicalMessage::new(delivery.data.clone());
+        let mut message = CanonicalMessage::new(delivery.data.clone());
+        if let Some(headers) = delivery.properties.headers() {
+            let mut metadata = std::collections::HashMap::new();
+            for (key, value) in headers.inner().iter() {
+                if let lapin::types::AMQPValue::LongString(s) = value {
+                    metadata.insert(key.to_string(), s.to_string());
+                }
+            }
+            message.metadata = metadata;
+        }
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {

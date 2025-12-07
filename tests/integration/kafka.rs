@@ -19,7 +19,7 @@ struct TestManager {
 }
 
 #[ctor]
-static TEST_MANAGER: TestManager = {
+static KAFKA_TEST_MANAGER: TestManager = {
     common::setup_logging();
     let manager = TestManager {
         docker: DockerCompose::new("tests/docker-compose.kafka.yml"),
@@ -30,21 +30,18 @@ static TEST_MANAGER: TestManager = {
 
 #[dtor]
 fn shutdown() {
-    TEST_MANAGER.docker.down();
+    KAFKA_TEST_MANAGER.docker.down();
 }
 
-#[tokio::test]
-async fn test_kafka_pipeline() {
+pub async fn test_kafka_pipeline() {
     run_pipeline_test("Kafka", "tests/config.kafka").await;
 }
 
-#[tokio::test]
-async fn test_kafka_performance_pipeline() {
+pub async fn test_kafka_performance_pipeline() {
     run_performance_pipeline_test("Kafka", "tests/config.kafka", PERF_TEST_MESSAGE_COUNT).await;
 }
 
-#[tokio::test]
-async fn test_kafka_performance_direct() {
+pub async fn test_kafka_performance_direct() {
     let topic = "perf_test_kafka_direct";
     let config = mq_multi_bridge::config::KafkaConfig {
         brokers: "localhost:9092".to_string(),
