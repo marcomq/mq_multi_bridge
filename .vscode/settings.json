@@ -1,6 +1,8 @@
 {
+    "rust-analyzer.cargo.features": [
+        "integration-test"
+    ],
     "rust-analyzer.cargo.testArgs": [
-        "--",
-        "--ignored"
+        "--release"
     ]
 }

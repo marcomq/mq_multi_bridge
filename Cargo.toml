@@ -76,3 +76,9 @@ metrics-util = "0.20.1"
 
 [features]
 default = []
+integration-test = []
+
+[[test]]
+name = "integration_test"
+harness = true # Use the standard test harness
+required-features = ["integration-test"]
