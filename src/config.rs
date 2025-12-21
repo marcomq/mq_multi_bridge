@@ -111,7 +111,7 @@ routes:
             "env-out-subject",
         );
 
-        std::env::set_var("CONFIG_FILE", "");
+        std::env::set_var("CONFIG_FILE", "_"); // ignore existing config.yaml
         // Load config
         let config = load_config().unwrap();
 

@@ -7,7 +7,7 @@ routes:
     input:
       http:
         url: "127.0.0.1:3000"
-        response_sink:
-          static: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nHello, bridge!"
+        response_out:
+          static: "Hello, bridge!"
     output:
       file: "output.txt"
