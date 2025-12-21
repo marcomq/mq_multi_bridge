@@ -27,8 +27,8 @@ Current status is work in progress. Don't use it without testing and fixing.
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/marcomq/mq_multi_bridge
-    cd mq_multi_bridge
+    git clone https://github.com/marcomq/mq-bridge-app
+    cd mq-bridge-app
     ```
 
 2.  **Configure the application:**
@@ -187,7 +187,7 @@ The core of the library are the `MessageConsumer` and `MessagePublisher` traits.
 Here's how you can create a publisher and send a message.
 
 ```rust,ignore
-use mq_multi_bridge::{
+use mq-bridge-app::{
     config::{KafkaConfig, NatsConfig, AmqpConfig},
     endpoints::{kafka::KafkaPublisher, nats::NatsPublisher, amqp::AmqpPublisher},
     model::CanonicalMessage,
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
 Here's how you can create a consumer and receive messages in a loop.
 
 ```rust,ignore
-use mq_multi_bridge::{
+use mq-bridge-app::{
     config::{KafkaConfig, NatsConfig, AmqpConfig},
     endpoints::{kafka::KafkaConsumer, nats::NatsConsumer, amqp::AmqpConsumer},
     consumers::MessageConsumer,
@@ -265,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
 You can extend the bridge with your own logic by implementing the `MessagePublisher` or `MessageConsumer` traits.
 
 ```rust,ignore
-use mq_multi_bridge::{model::CanonicalMessage, publishers::MessagePublisher};
+use mq-bridge-app::{model::CanonicalMessage, publishers::MessagePublisher};
 use async_trait::async_trait;
 use std::any::Any;
 

@@ -1,3 +1,13 @@
 # Logging configuration
-log_level: "info,mq_multi_bridge=debug"
+log_level: "debug,mq_bridge=trace"
+logger: "plain"
 
+routes:
+  http_to_file:
+    input:
+      http:
+        url: "127.0.0.1:3000"
+        response_sink:
+          static: "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nHello, bridge!"
+    output:
+      file: "output.txt"
