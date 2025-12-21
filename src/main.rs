@@ -98,7 +98,8 @@ async fn run_app(config: AppConfig) -> anyhow::Result<()> {
             config.metrics_addr
         ))?;
         let (recorder, server_future) = builder.with_http_listener(addr).build()?;
-        let _ = metrics::set_default_local_recorder(&recorder);
+        metrics::set_global_recorder(recorder)
+            .context("Failed to install Prometheus recorder")?;
         info!("Prometheus exporter listening on http://{}", addr);
         Some(tokio::spawn(server_future))
     } else {

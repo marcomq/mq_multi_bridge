@@ -86,50 +86,37 @@ routes:
         std::env::remove_var("MQB__LOG_LEVEL");
         std::env::set_var("MQB__LOG_LEVEL", "trace");
         std::env::set_var("MQB__LOGGER", "json");
-        std::env::set_var("MQB__SLED_PATH", "/tmp/env_test_db");
-        std::env::set_var("MQB__DEDUP_TTL_SECONDS", "300");
 
         // Route 0: Kafka to NATS
         std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__BROKERS",
+            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__INPUT__KAFKA__BROKERS",
             "env-kafka:9092",
         );
         // Source
         std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__GROUP_ID",
+            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__INPUT__KAFKA__GROUP_ID",
             "env-group",
         );
         std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__IN__KAFKA__TOPIC",
+            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__INPUT__KAFKA__TOPIC",
             "env-in-topic",
         );
         // Sink
         std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__URL",
+            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUTPUT__NATS__URL",
             "nats://env-nats:4222",
         );
         std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUT__NATS__SUBJECT",
+            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__OUTPUT__NATS__SUBJECT",
             "env-out-subject",
         );
-        // DLQ
-        std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__BROKERS",
-            "env-dlq-kafka:9092",
-        );
-        std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__GROUP_ID",
-            "env-dlq-group",
-        );
-        std::env::set_var(
-            "MQB__ROUTES__KAFKA_TO_NATS_FROM_ENV__DLQ__TOPIC",
-            "env-dlq-topic",
-        );
 
+        std::env::set_var("CONFIG_FILE", "");
         // Load config
         let config = load_config().unwrap();
 
         // Assertions
+        dbg!(&config.routes);
         assert_eq!(config.log_level, "trace");
         assert_eq!(config.logger, "json");
         assert_eq!(config.routes.len(), 1);

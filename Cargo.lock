@@ -2167,7 +2167,7 @@ dependencies = [
 [[package]]
 name = "mq-bridge"
 version = "0.1.0"
-source = "git+https://github.com/marcomq/mq-bridge#319e87103d61c327bd5df60ae31b5959a7f50f97"
+source = "git+https://github.com/marcomq/mq-bridge#054b8dc462d28b228fbe8ea13e6d2107f1e778a1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3885,6 +3885,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.1",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 

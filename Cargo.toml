@@ -27,7 +27,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tracing"] }
 
 # Error handling
 anyhow = "1.0.100"
@@ -43,4 +43,3 @@ metrics-exporter-prometheus = "0.18.1"
 [features]
 default = []
 integration-test = []
-

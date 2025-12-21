@@ -1,0 +1,6 @@
+[env]
+CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+
